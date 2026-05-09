@@ -64,10 +64,20 @@ def build_filename(package: PackageConfig, runtime_arch: str) -> str:
 
     if package.filename_override:
         return package.filename_override
+    product_token = filename_product_token(package.product, package.package_format)
     token = arch_token_for_package(package.package_format, runtime_arch)
     if package.package_format == "tar.gz":
-        return f"{package.product}-{package.version}-{token}.tar.gz"
-    return f"{package.product}-{package.version}-{token}.rpm"
+        return f"{product_token}-{package.artifact_version}-{token}.tar.gz"
+    return f"{product_token}-{package.artifact_version}{package.rpm_arch_separator}{token}.rpm"
+
+
+def filename_product_token(product: str, package_format: str) -> str:
+    """根据产品和包格式返回文件名中的产品片段。"""
+
+    mapping = {
+        ("Porting-Advisor", "tar.gz"): "DevKit-Porting-Advisor",
+    }
+    return mapping.get((product, package_format), product)
 
 
 def arch_token_for_package(package_format: str, runtime_arch: str) -> str:
@@ -98,7 +108,7 @@ def _build_resolved(
 ) -> ResolvedPackage:
     """组装 ResolvedPackage。"""
 
-    base_url = defaults.base_url.rstrip("/")
+    base_url = build_project_base_url(defaults.base_url, package.version)
     package_url = f"{base_url}/{filename}"
     signature_url = f"{package_url}{defaults.signature_suffix}"
     package_dir = download_dir() / package_id
@@ -114,3 +124,14 @@ def _build_resolved(
         package_path=package_path,
         signature_path=signature_path,
     )
+
+
+def build_project_base_url(base_url_prefix: str, project_version: str) -> str:
+    """拼接项目版本后的下载目录 URL。"""
+
+    base = base_url_prefix.rstrip("/")
+    if base.endswith(project_version):
+        return base
+    if base.endswith("%20") or base.endswith("/"):
+        return f"{base}{project_version}"
+    return f"{base}/{project_version}"

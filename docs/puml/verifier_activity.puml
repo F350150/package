@@ -1,0 +1,40 @@
+@startuml
+
+title detached p7s 验签流程（verifier.py）
+
+start
+:normalize_inform(signature_format);
+if (inform in {DER,PEM}?) then (yes)
+else (no)
+  :SignatureVerifyError: Unsupported signature format;
+  stop
+endif
+
+if (verify_chain=true?) then (yes)
+  if (root_ca exists?) then (yes)
+  else (no)
+    :SignatureVerifyError: Root CA file does not exist;
+    stop
+  endif
+else (no)
+  :标记 noverify 并输出 warning;
+endif
+
+:resolve_openssl_command();
+if (内置 openssl 存在?) then (yes)
+  :使用内置 openssl;
+else (no)
+  :回退系统 openssl;
+endif
+
+:组装 openssl cms verify 命令;
+:OPENSSL_CONF=/dev/null 执行命令;
+if (returncode==0?) then (yes)
+  :验签成功;
+  stop
+else (no)
+  :SignatureVerifyError: P7S verification failed;
+  stop
+endif
+
+@enduml

@@ -1,0 +1,58 @@
+@startuml
+
+title devkit-porting RPM 安装器详细流程
+
+start
+:pre_check(installed_version);
+if (installed_version == project_version\nAND install_dir/DevKit-Porting-CLI/devkit exists?) then (yes)
+  :skip + record state;
+  stop
+else (no)
+endif
+
+:download 主包(devkit-porting) 与签名;
+:download framework(devkit) 与签名;
+
+:verify 主包签名;
+:verify framework 签名;
+
+:for pkg in [framework,main] 执行 rpm -Uvh --replacepkgs --relocate;
+if (任一 rpm returncode != 0?) then (yes)
+  :InstallError: rpm install failed;
+  stop
+else (no)
+endif
+
+:porting_root = resolve_install_dir;
+if (mkdir porting_root 成功?) then (yes)
+else (no)
+  :InstallError: prepare porting root failed;
+  stop
+endif
+
+:target = porting_root/DevKit-Porting-CLI;
+if (target exists?) then (yes)
+  :删除已有 target(目录或文件);
+  if (删除失败?) then (yes)
+    :InstallError: clean existing target failed;
+    stop
+  endif
+else (no)
+endif
+
+if (_internal/devkit exists?) then (yes)
+else (no)
+  :InstallError: relocated devkit missing;
+  stop
+endif
+
+:rename _internal/devkit -> target;
+if (rename 成功?) then (yes)
+  :success;
+  stop
+else (no)
+  :InstallError: move devkit failed;
+  stop
+endif
+
+@enduml

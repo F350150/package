@@ -9,6 +9,8 @@ from pathlib import Path
 CERT_FILENAME = "huawei_integrity_root_ca_g2.pem"
 OPENSSL_BIN_NAME = "openssl"
 INTERNAL_DIR_NAME = "_internal"
+STATE_DIR_NAME = ".package-manager"
+STATE_FILE_NAME = ".install_state.yaml"
 
 
 def is_frozen() -> bool:
@@ -70,3 +72,15 @@ def log_dir() -> Path:
     """返回日志目录。"""
 
     return internal_dir() / "logs"
+
+
+def state_dir() -> Path:
+    """返回运行时状态目录（隐藏目录）。"""
+
+    return app_dir() / STATE_DIR_NAME
+
+
+def install_state_path() -> Path:
+    """返回安装状态文件路径（隐藏文件）。"""
+
+    return state_dir() / STATE_FILE_NAME

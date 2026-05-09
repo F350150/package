@@ -26,6 +26,7 @@ DER_CANONICAL="${ROOT_DIR}/pems/huawei_integrity_root_ca_g2.der"
 DER_FALLBACK="${ROOT_DIR}/Huawei Integrity Root CA - G2.der"
 INTERNAL_DIR="${ROOT_DIR}/_internal_build"
 INTERNAL_OPENSSL_BIN_DIR="${INTERNAL_DIR}/openssl/bin"
+INTERNAL_OPENSSL_LIB_DIR="${INTERNAL_DIR}/openssl/lib"
 INTERNAL_OPENSSL_PEMS_DIR="${INTERNAL_DIR}/openssl/pems"
 INTERNAL_PACKAGES_DIR="${INTERNAL_DIR}/packages"
 
@@ -64,11 +65,21 @@ print(f"Updated PACKAGE_VERSION to {version}")
 PY
 
 rm -rf "${INTERNAL_DIR}"
-mkdir -p "${INTERNAL_OPENSSL_BIN_DIR}" "${INTERNAL_OPENSSL_PEMS_DIR}" "${INTERNAL_PACKAGES_DIR}"
+mkdir -p "${INTERNAL_OPENSSL_BIN_DIR}" "${INTERNAL_OPENSSL_LIB_DIR}" "${INTERNAL_OPENSSL_PEMS_DIR}" "${INTERNAL_PACKAGES_DIR}"
 
 openssl x509 -inform DER -in "${DER_CANONICAL}" -out "${INTERNAL_OPENSSL_PEMS_DIR}/huawei_integrity_root_ca_g2.pem"
-cp -f "$(command -v openssl)" "${INTERNAL_OPENSSL_BIN_DIR}/openssl"
+OPENSSL_BIN_PATH="$(command -v openssl)"
+OPENSSL_PREFIX_DIR="$(cd "$(dirname "${OPENSSL_BIN_PATH}")/.." && pwd)"
+OPENSSL_LIB_SRC_DIR="${OPENSSL_PREFIX_DIR}/lib"
+
+cp -f "${OPENSSL_BIN_PATH}" "${INTERNAL_OPENSSL_BIN_DIR}/openssl"
 chmod +x "${INTERNAL_OPENSSL_BIN_DIR}/openssl"
+
+for lib in libssl.3.dylib libcrypto.3.dylib; do
+  if [[ -f "${OPENSSL_LIB_SRC_DIR}/${lib}" ]]; then
+    cp -f "${OPENSSL_LIB_SRC_DIR}/${lib}" "${INTERNAL_OPENSSL_LIB_DIR}/${lib}"
+  fi
+done
 
 cd "${ROOT_DIR}"
 export PYINSTALLER_CONFIG_DIR="${ROOT_DIR}/.pyinstaller"
@@ -76,8 +87,11 @@ pyinstaller --noconfirm --clean --onedir --name package-manager src/package_mana
 
 DIST_APP_DIR="${ROOT_DIR}/dist/package-manager"
 DIST_INTERNAL_DIR="${DIST_APP_DIR}/_internal"
+DIST_CONFIG_DIR="${DIST_APP_DIR}/config"
 mkdir -p "${DIST_INTERNAL_DIR}"
 cp -R "${INTERNAL_DIR}/." "${DIST_INTERNAL_DIR}/"
+mkdir -p "${DIST_CONFIG_DIR}"
+cp -f "${ROOT_DIR}/config/packages.yaml" "${DIST_CONFIG_DIR}/packages.yaml"
 rm -rf "${DIST_APP_DIR}/_internel"
 
 echo "Build finished"

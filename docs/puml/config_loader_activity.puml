@@ -1,0 +1,104 @@
+@startuml
+
+title 配置加载与校验流程（config.py）
+
+start
+:读取环境变量 PACKAGE_MANAGER_CONFIG_FILE;
+if (已配置?) then (yes)
+  :使用配置路径;
+else (no)
+  :尝试 app_dir/config/packages.yaml;
+  if (打包态路径存在?) then (yes)
+    :使用打包态配置;
+  else (no)
+    :回退 project_root/config/packages.yaml;
+  endif
+endif
+
+if (配置文件存在?) then (yes)
+else (no)
+  :ConfigError: Config file does not exist;
+  stop
+endif
+
+:加载 PyYAML;
+if (PyYAML 可用?) then (yes)
+else (no)
+  :ConfigError: PyYAML is required;
+  stop
+endif
+
+:读取并 safe_load YAML;
+if (解析成功?) then (yes)
+else (no)
+  :ConfigError: Failed to parse YAML;
+  stop
+endif
+
+if (根节点是 mapping?) then (yes)
+else (no)
+  :ConfigError: Config file must be a mapping;
+  stop
+endif
+
+:递归 token 替换 ${PACKAGE_VERSION};
+
+if (download_defaults 是 mapping?) then (yes)
+else (no)
+  :ConfigError: download_defaults must be a mapping;
+  stop
+endif
+
+if (verify_defaults 是 mapping?) then (yes)
+else (no)
+  :ConfigError: verify_defaults must be a mapping;
+  stop
+endif
+
+if (packages 是 list?) then (yes)
+else (no)
+  :ConfigError: packages must be a list;
+  stop
+endif
+
+repeat
+  :遍历每个 package 项;
+  if (item 是 mapping?) then (yes)
+  else (no)
+    :ConfigError: packages[i] must be a mapping;
+    stop
+  endif
+
+  :读取 product/version/artifact_version/package_format;
+  if (任一必填字段为空?) then (yes)
+    :ConfigError: Missing/empty required field;
+    stop
+  else (no)
+  endif
+
+  if (supported_versions 已配置?) then (yes)
+    if (是 list?) then (yes)
+    else (no)
+      :ConfigError: supported_versions must be a list;
+      stop
+    endif
+
+    if (project_version in supported_versions?) then (yes)
+    else (no)
+      :ConfigError: project version not supported;
+      stop
+    endif
+  else (no)
+  endif
+
+  if (rpm_arch_separator in {'-','.'}?) then (yes)
+  else (no)
+    :ConfigError: invalid rpm_arch_separator;
+    stop
+  endif
+repeat while (还有 package)
+
+:构造 RuntimeConfig 并缓存;
+stop
+
+@enduml

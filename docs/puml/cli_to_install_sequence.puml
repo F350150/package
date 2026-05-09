@@ -1,0 +1,74 @@
+@startuml
+
+title CLI 到安装执行时序图（含关键分支）
+
+autonumber
+actor User
+participant "main.py" as Main
+participant "service.py" as Service
+participant "config.py" as Config
+participant "resolver.py" as Resolver
+participant "installers.py\n(BaseInstaller 子类)" as Installer
+participant "install_state.py" as State
+participant "downloader.py" as Downloader
+participant "verifier.py" as Verifier
+
+User -> Main: 执行 package-manager\n(--list-packages / --name / --package-id)
+Main -> Service: run_with_builtin_config(...)
+Service -> Config: get_runtime_config()
+Config --> Service: RuntimeConfig
+
+alt --list-packages
+  Service -> Resolver: resolve_packages(enabled_packages)
+  Resolver --> Service: ResolvedPackage[]
+  Service --> Main: print list + return 0
+else 安装路径
+  Service -> Service: select_packages(name/package_id/all)
+  loop 每个 PackageConfig
+    Service -> Resolver: resolve_package(pkg, defaults)
+    Resolver --> Service: ResolvedPackage
+    Service -> Installer: installer.run()
+
+    Installer -> State: get_installed_version(product)
+    State --> Installer: installed_version | None
+
+    alt installed_version != project_version
+      Installer -> Installer: remove_previous_version()
+    end
+
+    Installer -> Installer: pre_check(installed_version)
+    alt pre_check == skip
+      Installer -> State: update_install_state(success)
+      Installer --> Service: return
+    else pre_check == install
+      Installer -> Downloader: download(package)
+      Downloader --> Installer: package file
+      Installer -> Downloader: download(signature)
+      Downloader --> Installer: signature file
+
+      Installer -> Verifier: verify_p7s_detached(...)
+      Verifier --> Installer: ok / SignatureVerifyError
+
+      Installer -> Installer: install()\n(产品子类实现)
+      Installer -> Installer: post_install_check()
+      Installer -> Installer: cleanup_after_success()
+      Installer -> State: update_install_state(success)
+      Installer --> Service: return
+    end
+
+    alt 任一阶段抛 InstallerError
+      Installer -> Installer: rollback_safely()
+      Installer -> Installer: cleanup_temp_safely()
+      Installer --> Service: raise InstallerError
+    else 抛未知异常
+      Installer -> Installer: rollback_safely()
+      Installer -> Installer: cleanup_temp_safely()
+      Installer --> Service: raise InstallError("Unhandled installer exception")
+    end
+  end
+  Service --> Main: return 0
+end
+
+Main --> User: exit code
+
+@enduml

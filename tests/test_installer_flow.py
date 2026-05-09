@@ -4,7 +4,7 @@ import pytest
 
 from package_manager.errors import DownloadError, InstallError, SignatureVerifyError
 from package_manager.models import DownloadDefaults, PackageConfig, ResolvedPackage, VerifyDefaults
-from package_manager.installers import BaseInstaller
+from package_manager.installers import BaseInstaller, PreCheckResult
 
 
 class DummyInstaller(BaseInstaller):
@@ -12,6 +12,14 @@ class DummyInstaller(BaseInstaller):
         super().__init__(*args, **kwargs)
         self.install_called = False
         self.rollback_called = False
+        self.remove_previous_called = False
+        self.precheck_result = PreCheckResult(should_install=True)
+
+    def pre_check(self, installed_version):
+        return self.precheck_result
+
+    def remove_previous_version(self, installed_version: str) -> None:
+        self.remove_previous_called = True
 
     def install(self) -> None:
         self.install_called = True
@@ -24,6 +32,7 @@ def _resolved(tmp_path: Path) -> ResolvedPackage:
     cfg = PackageConfig(
         product="tiancheng",
         version="1",
+        artifact_version="1",
         package_format="tar.gz",
     )
     package_id = "tiancheng-linux-x86_64-tar-gz"
@@ -57,6 +66,7 @@ def test_run_success(monkeypatch, tmp_path):
     monkeypatch.setattr("package_manager.installers.download_file", lambda *a, **k: None)
     monkeypatch.setattr("package_manager.installers.verify_p7s_detached", lambda *a, **k: None)
     monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
 
     inst.run()
     assert inst.install_called is True
@@ -71,6 +81,7 @@ def test_download_failure_cleanup(monkeypatch, tmp_path):
     monkeypatch.setattr("package_manager.installers.download_file", fail_download)
     monkeypatch.setattr("package_manager.installers.verify_p7s_detached", lambda *a, **k: None)
     monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
 
     with pytest.raises(DownloadError):
         inst.run()
@@ -90,6 +101,7 @@ def test_signature_failure_no_install(monkeypatch, tmp_path):
 
     monkeypatch.setattr("package_manager.installers.verify_p7s_detached", fail_sig)
     monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
 
     with pytest.raises(SignatureVerifyError):
         inst.run()
@@ -109,9 +121,34 @@ def test_install_failure_rollback_and_cleanup(monkeypatch, tmp_path):
     monkeypatch.setattr("package_manager.installers.download_file", lambda *a, **k: None)
     monkeypatch.setattr("package_manager.installers.verify_p7s_detached", lambda *a, **k: None)
     monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
 
     with pytest.raises(InstallError):
         inst.run()
 
     assert inst.rollback_called is True
     assert not inst.resolved.package_path.parent.exists()
+
+
+def test_version_switch_calls_remove_previous(monkeypatch, tmp_path):
+    inst = _installer(tmp_path)
+    monkeypatch.setattr("package_manager.installers.get_installed_version", lambda _p: "0.9")
+    monkeypatch.setattr("package_manager.installers.download_file", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installers.verify_p7s_detached", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
+
+    inst.run()
+    assert inst.remove_previous_called is True
+    assert inst.install_called is True
+
+
+def test_precheck_skip_does_not_install(monkeypatch, tmp_path):
+    inst = _installer(tmp_path)
+    inst.precheck_result = PreCheckResult(should_install=False, reason="already installed")
+    state_calls = []
+    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: state_calls.append(kwargs))
+
+    inst.run()
+    assert inst.install_called is False
+    assert len(state_calls) == 1

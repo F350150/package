@@ -30,6 +30,10 @@ PRODUCT_NAME="tiancheng"
 PACKAGE_ID=""
 LIST_ONLY="false"
 SKIP_TESTS="false"
+TEST_PORTING_INSTALLERS="false"
+CONTAINER_NAME=""
+CONTAINER_BOOTSTRAP_DEPS="true"
+FORWARD_ARGS=()
 
 # -----------------------------
 # 用法说明
@@ -45,6 +49,9 @@ Options:
   --package-id <id>     按 package-id 安装（优先级高于 --name）
   --list-only           只构建并列包，不执行安装
   --skip-tests          跳过 pytest
+  --test-porting-installers  依次测试 Porting-Advisor 与 devkit-porting 两个 installer
+  --container <name>    在指定容器里执行完整 quick_start 测试流程
+  --container-no-bootstrap  容器模式下不自动安装 pytest/pyinstaller
   -h, --help            查看帮助
 
 Examples:
@@ -52,7 +59,42 @@ Examples:
   ./scripts/quick_start.sh --version 26.0.RC1 --name tiancheng
   ./scripts/quick_start.sh --package-id tiancheng-linux-arm64-tar-gz
   ./scripts/quick_start.sh --list-only
+  ./scripts/quick_start.sh --container openeuler-arm --test-porting-installers
 EOF
+}
+
+run_inside_container() {
+  local container_name="$1"
+  local run_dir="/root/package_e2e_$(date +%Y%m%d_%H%M%S)"
+  local cmd_parts=()
+  local container_cmd=""
+  local quoted_args=()
+
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "容器模式需要 docker 命令"
+    exit 1
+  fi
+
+  echo "[container] 复制项目到容器 ${container_name}:${run_dir}"
+  docker cp "${ROOT_DIR}/." "${container_name}:${run_dir}"
+
+  if [[ "${CONTAINER_BOOTSTRAP_DEPS}" == "true" ]]; then
+    cmd_parts+=("python3 -m pip --version >/dev/null 2>&1 || (python3 -m ensurepip --upgrade >/dev/null 2>&1 || true)")
+    cmd_parts+=("python3 -m pip install --no-cache-dir pytest pyinstaller pyyaml")
+  fi
+
+  for arg in "${FORWARD_ARGS[@]}"; do
+    quoted_args+=("$(printf '%q' "$arg")")
+  done
+
+  cmd_parts+=("INTERNAL_CONTAINER_RUN=1 ./scripts/quick_start.sh ${quoted_args[*]}")
+  container_cmd="${cmd_parts[0]}"
+  for ((i = 1; i < ${#cmd_parts[@]}; i++)); do
+    container_cmd="${container_cmd} && ${cmd_parts[$i]}"
+  done
+
+  echo "[container] 在容器内执行 quick_start..."
+  docker exec "${container_name}" /bin/bash -lc "cd '${run_dir}' && ${container_cmd}"
 }
 
 # -----------------------------
@@ -62,22 +104,40 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)
       VERSION="${2:-}"
+      FORWARD_ARGS+=("$1" "$2")
       shift 2
       ;;
     --name)
       PRODUCT_NAME="${2:-}"
+      FORWARD_ARGS+=("$1" "$2")
       shift 2
       ;;
     --package-id)
       PACKAGE_ID="${2:-}"
+      FORWARD_ARGS+=("$1" "$2")
       shift 2
       ;;
     --list-only)
       LIST_ONLY="true"
+      FORWARD_ARGS+=("$1")
       shift
       ;;
     --skip-tests)
       SKIP_TESTS="true"
+      FORWARD_ARGS+=("$1")
+      shift
+      ;;
+    --test-porting-installers)
+      TEST_PORTING_INSTALLERS="true"
+      FORWARD_ARGS+=("$1")
+      shift
+      ;;
+    --container)
+      CONTAINER_NAME="${2:-}"
+      shift 2
+      ;;
+    --container-no-bootstrap)
+      CONTAINER_BOOTSTRAP_DEPS="false"
       shift
       ;;
     -h|--help)
@@ -91,6 +151,15 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "${CONTAINER_NAME}" && "${INTERNAL_CONTAINER_RUN:-0}" != "1" ]]; then
+  if [[ -z "${CONTAINER_NAME}" ]]; then
+    echo "--container 不能为空"
+    exit 1
+  fi
+  run_inside_container "${CONTAINER_NAME}"
+  exit $?
+fi
 
 # -----------------------------
 # 基础校验
@@ -122,6 +191,11 @@ for cmd in python openssl pyinstaller; do
     exit 1
   fi
 done
+
+if ! python -c "import yaml" >/dev/null 2>&1; then
+  echo "Python 模块缺失: pyyaml（请执行: python -m pip install pyyaml）"
+  exit 1
+fi
 
 # -----------------------------
 # 1) （可选）执行测试
@@ -173,6 +247,18 @@ fi
 # -----------------------------
 # 5) 执行安装
 # -----------------------------
+if [[ "${TEST_PORTING_INSTALLERS}" == "true" ]]; then
+  echo "[5/5] 依次测试两个 installer: Porting-Advisor + devkit-porting"
+  "${BIN_PATH}" --name "Porting-Advisor"
+  if command -v rpm >/dev/null 2>&1; then
+    "${BIN_PATH}" --name "devkit-porting"
+  else
+    echo "WARNING: rpm 命令不存在，当前主机跳过 devkit-porting installer 测试"
+  fi
+  echo "Quick start 完成（porting installers）。"
+  exit 0
+fi
+
 INSTALL_CMD=("${BIN_PATH}")
 
 if [[ -n "${PACKAGE_ID}" ]]; then

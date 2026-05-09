@@ -1,0 +1,39 @@
+download_defaults:
+  base_url: "https://kunpeng-repo.obs.cn-north-4.myhuaweicloud.com/Kunpeng%20DevKit/Kunpeng%20DevKit%20"
+  signature_suffix: ".p7s"
+  timeout_seconds: 300
+  retry: 3
+
+verify_defaults:
+  signature_type: "p7s"
+  signature_format: "DER"
+  verify_chain: true
+
+packages:
+  - product: "tiancheng"
+    version: "${PACKAGE_VERSION}"
+    artifact_version: "${PACKAGE_VERSION}"
+    supported_versions:
+      - "${PACKAGE_VERSION}"
+    package_format: "tar.gz"
+    install_dir: "_internal/products/tiancheng"
+    enabled: true
+
+  - product: "Porting-Advisor"
+    version: "${PACKAGE_VERSION}"
+    artifact_version: "${PACKAGE_VERSION}"
+    supported_versions:
+      - "${PACKAGE_VERSION}"
+    package_format: "tar.gz"
+    install_dir: "_internal/porting_cli"
+    enabled: true
+
+  - product: "devkit-porting"
+    version: "${PACKAGE_VERSION}"
+    artifact_version: "26.0.rc1-1"
+    supported_versions:
+      - "${PACKAGE_VERSION}"
+    package_format: "rpm"
+    rpm_arch_separator: "."
+    install_dir: "_internal/porting_cli"
+    enabled: true

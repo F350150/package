@@ -1,0 +1,54 @@
+@startuml
+
+title 下载器流程与异常分支（downloader.py）
+
+start
+:download_file(url,destination,timeout,retry);
+:创建 destination.parent;
+:tmp = destination + .tmp;
+:HEAD 探测 remote_size(可选);
+
+if (本地已存在且可复用?) then (yes)
+  :skip download;
+  stop
+else (no)
+endif
+
+if (磁盘空间校验通过?) then (yes)
+else (no)
+  :DownloadError: Insufficient disk space;
+  stop
+endif
+
+:attempts = max(1,retry);
+
+repeat
+  :清理历史 tmp;
+  :建立 TLS 上下文;
+  if (TLS_INSECURE=1?) then (yes)
+    :禁用证书校验并告警;
+  else (no)
+    :加载内置 root_ca (若存在);
+    :加载 TLS_CA_FILE_ENV (若配置);
+  endif
+
+  :urlopen + 流式写入 tmp;
+  if (下载流异常?) then (yes)
+    :记录失败 attempt;
+    :清理 tmp;
+  else (no)
+    if (tmp 非空?) then (yes)
+      :tmp 原子替换 destination;
+      :下载成功;
+      stop
+    else (no)
+      :记录空文件失败;
+      :清理 tmp;
+    endif
+  endif
+repeat while (未超过 attempts)
+
+:DownloadError: Failed to download;
+stop
+
+@enduml

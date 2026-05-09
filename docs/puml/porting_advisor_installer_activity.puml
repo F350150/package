@@ -1,0 +1,62 @@
+@startuml
+
+title Porting-Advisor 安装器详细流程
+
+start
+:pre_check(installed_version);
+if (installed_version == project_version\nAND install_dir 存在 config/jre/jar?) then (yes)
+  :skip + record state;
+  stop
+else (no)
+endif
+
+:reset install_dir;
+:stage_dir = package_dir/_extract_porting_advisor;
+:extract outer tar.gz 到 stage_dir;
+:level1 = first child dir;
+:nested_tar = first *.tar.gz in level1;
+:extract nested_tar 到 level1;
+
+:detect payload_dir;
+if (base_dir 含 Sql-Analysis/jre 包?) then (yes)
+  :payload=base_dir;
+else (no)
+  :在一级子目录中搜索 payload;
+  if (找到?) then (yes)
+  else (no)
+    :InstallError: payload directory missing;
+    stop
+  endif
+endif
+
+:sql_tar = Sql-Analysis-*.tar.gz;
+:jre_tar = jre-linux-*.tar.gz;
+:extract sql_tar/jre_tar;
+:sql_dir = Sql-Analysis-*;
+:jar = first *.jar;
+
+if (sql_dir/config 存在?) then (yes)
+else (no)
+  :InstallError: Sql-Analysis config missing;
+  stop
+endif
+
+if (payload/jre 存在?) then (yes)
+else (no)
+  :InstallError: jre missing;
+  stop
+endif
+
+:copytree config -> install_dir/config;
+:copytree jre -> install_dir/jre;
+:copy2 jar -> install_dir;
+
+if (install_dir 含 config/jre/jar?) then (yes)
+  :success;
+  stop
+else (no)
+  :InstallError: runtime layout invalid;
+  stop
+endif
+
+@enduml

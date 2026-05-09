@@ -8,17 +8,49 @@
 5. 大块流式写入（降低系统调用开销）
 """
 
+import os
 import shutil
+import ssl
 import urllib.request
 from pathlib import Path
+import time
 from typing import Optional
 
 from package_manager.errors import DownloadError
+from package_manager.paths import root_ca_path
 
 COPY_BUFFER_SIZE = 8 * 1024 * 1024
 MIN_FREE_SPACE_BYTES_UNKNOWN_SIZE = 500 * 1024 * 1024
 LOW_FREE_SPACE_WARNING_BYTES = 1 * 1024 * 1024 * 1024
 LOW_FREE_SPACE_WARNING_RATIO = 0.05
+TLS_CA_FILE_ENV = "PACKAGE_MANAGER_TLS_CA_FILE"
+TLS_INSECURE_ENV = "PACKAGE_MANAGER_TLS_INSECURE"
+
+
+def build_ssl_context() -> ssl.SSLContext:
+    """构造下载使用的 TLS 上下文。"""
+
+    if os.getenv(TLS_INSECURE_ENV, "").strip().lower() in {"1", "true", "yes"}:
+        print(f"WARNING: {TLS_INSECURE_ENV}=1, TLS certificate verification is disabled")
+        return ssl._create_unverified_context()
+
+    context = ssl.create_default_context()
+    cert_path = root_ca_path()
+    if cert_path.exists():
+        context.load_verify_locations(cafile=str(cert_path))
+
+    extra_ca_file = os.getenv(TLS_CA_FILE_ENV, "").strip()
+    if extra_ca_file:
+        context.load_verify_locations(cafile=extra_ca_file)
+
+    return context
+
+
+def open_url(url_or_request, timeout_seconds: int):
+    """统一封装 urlopen，确保下载与 HEAD 都使用同一 TLS 配置。"""
+
+    context = build_ssl_context()
+    return urllib.request.urlopen(url_or_request, timeout=timeout_seconds, context=context)
 
 
 def download_file(url: str, destination: Path, timeout_seconds: int, retry: int) -> None:
@@ -45,7 +77,7 @@ def get_remote_file_size(url: str, timeout_seconds: int) -> Optional[int]:
 
     try:
         req = urllib.request.Request(url, method="HEAD")
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
+        with open_url(req, timeout_seconds) as response:
             value = response.headers.get("Content-Length")
     except Exception:
         return None
@@ -160,9 +192,9 @@ def download_once(
 
     cleanup_tmp(tmp_path)
     print(f"Downloading {url} -> {destination} (attempt {attempt}/{attempts})")
-    with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
+    with open_url(url, timeout_seconds) as response:
         with tmp_path.open("wb") as dst:
-            stream_copy(response, dst)
+            stream_copy(response, dst, remote_size=read_content_length(response))
     ensure_non_empty(tmp_path, url)
     tmp_path.replace(destination)
     print(f"Download succeeded: {destination}")
@@ -175,14 +207,49 @@ def cleanup_tmp(tmp_path: Path) -> None:
         tmp_path.unlink(missing_ok=True)
 
 
-def stream_copy(src, dst) -> None:
-    """以大块缓冲拷贝流。"""
+def read_content_length(response) -> Optional[int]:
+    """从响应头读取并解析 Content-Length。"""
 
+    value = response.headers.get("Content-Length")
+    return parse_content_length(value)
+
+
+def stream_copy(src, dst, remote_size: Optional[int] = None) -> None:
+    """以大块缓冲拷贝流，并输出下载进度。"""
+
+    downloaded = 0
+    started_at = time.time()
+    last_print = 0.0
     while True:
         chunk = src.read(COPY_BUFFER_SIZE)
         if not chunk:
+            if remote_size:
+                print()
             return
         dst.write(chunk)
+        downloaded += len(chunk)
+        now = time.time()
+        if remote_size and (now - last_print >= 0.2 or downloaded >= remote_size):
+            print_progress(downloaded, remote_size, started_at)
+            last_print = now
+
+
+def print_progress(downloaded: int, total: int, started_at: float) -> None:
+    """输出单行下载进度条。"""
+
+    percent = min(100, int(downloaded * 100 / total)) if total > 0 else 0
+    bar_width = 70
+    filled = int(bar_width * percent / 100)
+    bar = "=" * max(0, filled - 1) + (">" if filled > 0 and percent < 100 else "=") + " " * (bar_width - filled)
+    elapsed = max(0.001, time.time() - started_at)
+    speed = downloaded / elapsed
+    eta = int((total - downloaded) / speed) if speed > 0 else 0
+    print(
+        f"\r{percent}%[{bar}] {downloaded / (1024 * 1024):.2f}M "
+        f"{speed / (1024 * 1024):.1f}MB/s eta {eta // 60}m {eta % 60}s",
+        end="",
+        flush=True,
+    )
 
 
 def ensure_non_empty(path: Path, url: str) -> None:

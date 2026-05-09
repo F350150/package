@@ -5,7 +5,6 @@ import sys
 from typing import List, Optional
 
 from package_manager.errors import InstallerError
-from package_manager.service import run_with_builtin_config
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
@@ -24,6 +23,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     args = parse_args(normalize_argv(argv))
     try:
+        # 延迟导入，确保配置加载异常能被统一错误处理捕获。
+        from package_manager.service import run_with_builtin_config
+
         return run_with_builtin_config(name=args.name, package_id=args.package_id, list_packages=args.list_packages)
     except InstallerError as exc:
         print(f"Installer error: {exc}")

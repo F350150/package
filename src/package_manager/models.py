@@ -5,7 +5,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -31,15 +31,19 @@ class VerifyDefaults:
 class PackageConfig:
     """包配置。
 
-    只保留最小必要字段：产品名、版本、包格式。
-    其余冗余信息由 resolver 在运行时推导。
+    字段语义：
+    1. version：项目版本（用于拼接下载目录与安装状态管理）
+    2. artifact_version：产品包自身版本（用于拼接文件名）
     """
 
     product: str
     version: str
+    artifact_version: str
     package_format: str  # 仅支持: "rpm" | "tar.gz"
+    rpm_arch_separator: str = "-"
     os: str = "linux"
     filename_override: Optional[str] = None
+    supported_versions: Optional[Tuple[str, ...]] = None
     # 安装目录：支持绝对路径或相对 app_dir 的相对路径。
     # 为空时走默认路径（_internal/products/<product>）。
     install_dir: Optional[str] = None

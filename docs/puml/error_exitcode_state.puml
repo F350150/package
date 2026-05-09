@@ -1,0 +1,28 @@
+@startuml
+
+title 错误到退出码状态图
+
+[*] --> Running
+
+Running --> Success : no exception
+Success --> Exit0 : return 0
+
+Running --> ConfigError : ConfigError
+ConfigError --> Exit10 : exit_code=10
+
+Running --> DownloadError : DownloadError
+DownloadError --> Exit20 : exit_code=20
+
+Running --> SignatureVerifyError : SignatureVerifyError
+SignatureVerifyError --> Exit40 : exit_code=40
+
+Running --> InstallError : InstallError
+InstallError --> Exit50 : exit_code=50
+
+Running --> CleanupError : CleanupError
+CleanupError --> Exit60 : exit_code=60
+
+Running --> UnknownException : non-InstallerError
+UnknownException --> Exit1 : main() fallback
+
+@enduml

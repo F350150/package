@@ -1,0 +1,50 @@
+@startuml
+
+title BaseInstaller.run 模板方法活动图
+
+start
+:读取 installed_version;
+:target_version = config.version(项目版本);
+
+if (installed_version 存在 且 != target_version?) then (yes)
+  :remove_previous_version(installed_version);
+else (no)
+endif
+
+:pre_check(installed_version);
+if (should_install?) then (no)
+  :打印 skip 原因;
+  :record_install_success();
+  stop
+else (yes)
+endif
+
+partition "主流程" {
+  :prepare();
+  :download();
+  :verify_signature();
+  :pre_install();
+  :install();
+  :post_install_check();
+  :cleanup_after_success();
+  :record_install_success();
+}
+
+:打印 completed;
+stop
+
+partition "异常处理" {
+  if (捕获 InstallerError?) then (yes)
+    :打印 failed;
+    :rollback_safely();
+    :cleanup_temp_safely();
+    :向上抛原异常;
+  else (no)
+    :打印 failed;
+    :rollback_safely();
+    :cleanup_temp_safely();
+    :抛 InstallError("Unhandled installer exception");
+  endif
+}
+
+@enduml

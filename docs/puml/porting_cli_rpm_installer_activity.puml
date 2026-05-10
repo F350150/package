@@ -10,8 +10,12 @@ if (installed_version == project_version\nAND install_dir/DevKit-Porting-CLI/dev
 else (no)
 endif
 
-:download 主包(devkit-porting) 与签名;
-:download framework(devkit) 与签名;
+:ensure_local_or_download(主包/主签名/framework/framework签名);
+if (任一文件缺失且网络不可达?) then (yes)
+  :DownloadError(20) + 离线投放路径提示;
+  stop
+else (no)
+endif
 
 :verify 主包签名;
 :verify framework 签名;

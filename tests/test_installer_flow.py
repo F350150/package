@@ -34,15 +34,14 @@ def _resolved(tmp_path: Path) -> ResolvedPackage:
         version="1",
         artifact_version="1",
         package_format="tar.gz",
+        install_dir="_internal/products/tiancheng",
     )
-    package_id = "tiancheng-linux-x86_64-tar-gz"
-    package_dir = tmp_path / "downloads" / package_id
+    package_dir = tmp_path / "downloads" / cfg.product
     package_dir.mkdir(parents=True)
     package_path = package_dir / "a.tar.gz"
     sig_path = package_dir / "a.tar.gz.p7s"
     return ResolvedPackage(
         config=cfg,
-        package_id=package_id,
         runtime_arch="x86_64",
         filename="a.tar.gz",
         package_url="http://x/a.tar.gz",
@@ -152,3 +151,38 @@ def test_precheck_skip_does_not_install(monkeypatch, tmp_path):
     inst.run()
     assert inst.install_called is False
     assert len(state_calls) == 1
+
+
+def test_download_uses_local_files_without_network(monkeypatch, tmp_path):
+    inst = _installer(tmp_path)
+    inst.resolved.package_path.write_bytes(b"pkg")
+    inst.resolved.signature_path.write_bytes(b"sig")
+    download_calls = []
+    monkeypatch.setattr("package_manager.installers.download_file", lambda *a, **k: download_calls.append((a, k)))
+    monkeypatch.setattr("package_manager.installers.verify_p7s_detached", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
+
+    inst.run()
+
+    assert inst.install_called is True
+    assert download_calls == []
+
+
+def test_download_failure_contains_offline_hint(monkeypatch, tmp_path):
+    inst = _installer(tmp_path)
+
+    def fail_download(*_a, **_k):
+        raise DownloadError("network down")
+
+    monkeypatch.setattr("package_manager.installers.download_file", fail_download)
+    monkeypatch.setattr("package_manager.installers.verify_p7s_detached", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
+
+    with pytest.raises(DownloadError) as excinfo:
+        inst.run()
+
+    message = str(excinfo.value)
+    assert "Offline install hint" in message
+    assert str(inst.resolved.package_path) in message

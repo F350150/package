@@ -1,0 +1,35 @@
+@startuml
+
+title 离线优先决策流程（ensure_local_or_download）
+
+start
+:输入 url + destination;
+
+if (destination 存在且是文件?) then (yes)
+  if (size > 0?) then (yes)
+    :打印 "Use local artifact file";
+    :直接返回;
+    stop
+  else (no)
+    :判定为空文件，视为不可用;
+  endif
+else (no)
+endif
+
+:调用 downloader.download_file(...);
+if (下载成功?) then (yes)
+  :返回;
+  stop
+else (no)
+  :包装 DownloadError;
+  :附加离线提示：
+  note right
+    Offline install hint:
+    place file at <destination>
+    and rerun.
+  end note
+  :抛出 DownloadError(20);
+  stop
+endif
+
+@enduml

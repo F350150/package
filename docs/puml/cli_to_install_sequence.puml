@@ -13,21 +13,16 @@ participant "install_state.py" as State
 participant "downloader.py" as Downloader
 participant "verifier.py" as Verifier
 
-User -> Main: 执行 package-manager\n(--list-packages / --name / --package-id)
+User -> Main: 执行 package-manager\n(--name)
 Main -> Service: run_with_builtin_config(...)
 Service -> Config: get_runtime_config()
 Config --> Service: RuntimeConfig
 
-alt --list-packages
-  Service -> Resolver: resolve_packages(enabled_packages)
-  Resolver --> Service: ResolvedPackage[]
-  Service --> Main: print list + return 0
-else 安装路径
-  Service -> Service: select_packages(name/package_id/all)
-  loop 每个 PackageConfig
-    Service -> Resolver: resolve_package(pkg, defaults)
-    Resolver --> Service: ResolvedPackage
-    Service -> Installer: installer.run()
+Service -> Service: select_packages(name)
+loop 每个 PackageConfig
+  Service -> Resolver: resolve_package(pkg, defaults)
+  Resolver --> Service: ResolvedPackage
+  Service -> Installer: installer.run()
 
     Installer -> State: get_installed_version(product)
     State --> Installer: installed_version | None
@@ -41,10 +36,25 @@ else 安装路径
       Installer -> State: update_install_state(success)
       Installer --> Service: return
     else pre_check == install
-      Installer -> Downloader: download(package)
-      Downloader --> Installer: package file
-      Installer -> Downloader: download(signature)
-      Downloader --> Installer: signature file
+      Installer -> Installer: ensure_local_or_download(package)
+      alt 本地包命中且非空
+        Installer --> Installer: use local package
+      else 本地缺失或空文件
+        Installer -> Downloader: download(package)
+        Downloader --> Installer: package file
+      end
+
+      Installer -> Installer: ensure_local_or_download(signature)
+      alt 本地签名命中且非空
+        Installer --> Installer: use local signature
+      else 本地签名缺失或空文件
+        Installer -> Downloader: download(signature)
+        Downloader --> Installer: signature file
+      end
+
+      opt devkit-porting: framework 包
+        Installer -> Installer: ensure_local_or_download(framework package/signature)
+      end
 
       Installer -> Verifier: verify_p7s_detached(...)
       Verifier --> Installer: ok / SignatureVerifyError
@@ -65,9 +75,8 @@ else 安装路径
       Installer -> Installer: cleanup_temp_safely()
       Installer --> Service: raise InstallError("Unhandled installer exception")
     end
-  end
-  Service --> Main: return 0
 end
+Service --> Main: return 0
 
 Main --> User: exit code
 

@@ -14,19 +14,19 @@ packages:
   # filename_override: "custom-file-name.tar.gz"
   # 用途：当上游包名不符合默认拼接规则时，显式指定完整文件名。
   - product: "DevKit-Porting-Advisor"
-    project_version: "26.0.RC1"
-    artifact_version: "26.0.RC1"
+    project_version: "${PACKAGE_VERSION}"
+    artifact_version: "${PACKAGE_VERSION}"
     supported_versions:
-      - "26.0.RC1"
+      - "${PACKAGE_VERSION}"
     package_format: "tar.gz"
     install_dir: "_internal/porting_cli"
     enabled: true
 
   - product: "devkit-porting"
-    project_version: "26.0.RC1"
+    project_version: "${PACKAGE_VERSION}"
     artifact_version: "26.0.rc1-1"
     supported_versions:
-      - "26.0.RC1"
+      - "${PACKAGE_VERSION}"
     package_format: "rpm"
     rpm_arch_separator: "."
     install_dir: "_internal/porting_cli"

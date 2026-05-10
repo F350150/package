@@ -2,6 +2,10 @@
 
 title 下载器流程与异常分支（downloader.py）
 
+' 说明：
+' 该流程仅在“本地文件缺失或空文件”时触发。
+' 本地命中分支在 installers.ensure_local_or_download 中处理。
+
 start
 :download_file(url,destination,timeout,retry);
 :创建 destination.parent;

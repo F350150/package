@@ -22,6 +22,12 @@ endif
 partition "主流程" {
   :prepare();
   :download();
+  note right
+    download() 内部对每个文件执行：
+    1) 本地存在且非空 -> 直接使用
+    2) 否则下载
+    3) 下载失败 -> 抛出离线投放提示
+  end note
   :verify_signature();
   :pre_install();
   :install();

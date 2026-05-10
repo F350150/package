@@ -1,0 +1,105 @@
+@startuml
+
+title 运行期整体流程图
+
+start
+
+:接收安装请求（name）;
+if (输入有效?) then (是)
+else (否)
+  :配置错误退出;
+  stop
+endif
+
+:加载并校验运行配置;
+if (配置可用?) then (是)
+else (否)
+  :配置错误退出;
+  stop
+endif
+
+:按 name 选择目标产品;
+if (命中可安装产品?) then (是)
+else (否)
+  :配置错误退出;
+  stop
+endif
+
+:解析目标包信息
+(架构/文件名/下载地址/本地缓存路径);
+if (解析成功?) then (是)
+else (否)
+  :配置错误退出;
+  stop
+endif
+
+:读取已安装状态;
+if (检测到版本切换?) then (是)
+  :清理旧版本;
+else (否)
+endif
+
+:执行 pre-check;
+if (满足跳过条件?) then (是)
+  :刷新成功状态;
+  :成功退出;
+  stop
+else (否)
+endif
+
+:准备安装环境;
+
+:获取主包与签名
+(本地命中优先, 否则下载);
+if (获取失败?) then (是)
+  :下载错误退出
+(附离线投放提示);
+  stop
+else (否)
+endif
+
+if (存在附加依赖包?) then (是)
+  :获取附加依赖包与签名;
+  if (获取失败?) then (是)
+    :下载错误退出
+(附离线投放提示);
+    stop
+  else (否)
+  endif
+else (否)
+endif
+
+:执行签名校验;
+if (验签通过?) then (是)
+else (否)
+  :验签错误退出;
+  stop
+endif
+
+:执行安装;
+if (安装成功?) then (是)
+else (否)
+  :回滚与临时清理;
+  :安装错误退出;
+  stop
+endif
+
+:安装后校验;
+if (校验通过?) then (是)
+else (否)
+  :回滚与临时清理;
+  :安装错误退出;
+  stop
+endif
+
+:清理下载缓存;
+if (清理成功?) then (是)
+  :写入成功状态;
+  :成功退出;
+  stop
+else (否)
+  :清理错误退出;
+  stop
+endif
+
+@enduml

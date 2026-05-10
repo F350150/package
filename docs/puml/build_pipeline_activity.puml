@@ -1,35 +1,71 @@
 @startuml
 
-title 编译期流程（scripts/build.sh）
+title 编译期流程（scripts/build.sh + build_config_renderer.py）
 
 start
-:输入版本参数(默认 26.0.RC1);
-:校验必要工具\n(pyinstaller, openssl, python);
-:更新 PACKAGE_VERSION 常量;
-:读取 DER 根证书;
-:转换生成 PEM;
-
-partition "PyInstaller 打包" {
-  :清理旧 build/dist;
-  :执行 pyinstaller spec;
-  :生成 dist/package-manager/package-manager;
-}
-
-partition "产物整理" {
-  :创建 _internal 目录树;
-  :复制 openssl 可执行文件到 _internal/openssl/bin;
-  :复制 PEM 到 _internal/openssl/pems;
-  :复制 openssl 动态库到 _internal/openssl/lib;
-  :复制 config/packages.yaml 到 dist/config;
-}
-
-:产物校验\n(binary/_internal/pems/packages 目录);
-if (校验通过?) then (yes)
-  :输出构建成功信息;
+:接收 VERSION 参数;
+if (VERSION 为空?) then (yes)
+  :打印用法并退出 1;
   stop
 else (no)
-  :输出缺失项并退出非0;
-  stop
 endif
+
+:检查 openssl/pyinstaller 命令存在;
+if (缺失依赖?) then (yes)
+  :退出 1;
+  stop
+else (no)
+endif
+
+:检查 pems/huawei_integrity_root_ca_g2.der;
+if (canonical DER 缺失?) then (yes)
+  if (fallback DER 存在?) then (yes)
+    :复制 fallback -> canonical;
+  else (no)
+    :证书缺失，退出 1;
+    stop
+  endif
+endif
+
+:检查 config/packages.template.yaml;
+if (模板缺失?) then (yes)
+  :退出 1;
+  stop
+else (no)
+endif
+
+partition "组装 _internal_build" {
+  :创建 openssl/bin, openssl/lib, openssl/pems, packages;
+  :DER -> PEM;
+  :复制 openssl 可执行文件;
+  :收集 libssl/libcrypto 动态库;
+}
+
+partition "打包" {
+  :执行 pyinstaller --onedir;
+  if (pyinstaller 失败?) then (yes)
+    :退出非0;
+    stop
+  endif
+}
+
+partition "运行配置渲染" {
+  :调用 python -m package_manager.build_config_renderer;
+  :读取 packages.template.yaml;
+  :替换 ${PACKAGE_VERSION};
+  :输出 dist/package-manager/config/packages.yaml;
+  if (渲染失败?) then (yes)
+    :退出非0;
+    stop
+  endif
+}
+
+partition "产物落盘" {
+  :复制 _internal_build -> dist/package-manager/_internal;
+  :清理误拼目录 _internel;
+}
+
+:输出 Build finished 与关键路径;
+stop
 
 @enduml

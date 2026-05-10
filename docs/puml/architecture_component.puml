@@ -1,4 +1,5 @@
 @startuml
+!pragma layout smetana
 skinparam componentStyle rectangle
 skinparam packageStyle rectangle
 
@@ -19,11 +20,12 @@ package "配置层" {
 }
 
 package "解析层" {
-  [resolver.py\nURL/文件名/package-id 解析]
+  [resolver.py\nURL/文件名/包元信息 解析]
 }
 
 package "执行层" {
   [installers.py\n模板方法 + 产品安装器]
+  [ensure_local_or_download\n离线优先决策]
   [downloader.py\n下载/重试/磁盘空间]
   [verifier.py\nOpenSSL 验签]
 }
@@ -36,19 +38,21 @@ package "基础设施" {
 database "config/packages.yaml" as yaml
 database ".package-manager/.install_state.yaml" as state
 folder "_internal/packages" as cache
-folder "_internal/porting_cli\n_internal/products" as install_root
+folder "config.install_dir 指定的安装目录" as install_root
 
 [main.py\n参数解析/退出码映射] --> [service.py\n选包/执行顺序]
 [service.py\n选包/执行顺序] --> [config.py\nYAML 加载/校验]
-[service.py\n选包/执行顺序] --> [resolver.py\nURL/文件名/package-id 解析]
+[service.py\n选包/执行顺序] --> [resolver.py\nURL/文件名/包元信息 解析]
 [service.py\n选包/执行顺序] --> [installers.py\n模板方法 + 产品安装器]
 
 [config.py\nYAML 加载/校验] --> [models.py\n数据模型]
 [config.py\nYAML 加载/校验] --> yaml
-[resolver.py\nURL/文件名/package-id 解析] --> [models.py\n数据模型]
-[resolver.py\nURL/文件名/package-id 解析] --> [paths.py\n路径规范]
+[resolver.py\nURL/文件名/包元信息 解析] --> [models.py\n数据模型]
+[resolver.py\nURL/文件名/包元信息 解析] --> [paths.py\n路径规范]
 
 [installers.py\n模板方法 + 产品安装器] --> [install_state.py\n已安装状态持久化]
+[installers.py\n模板方法 + 产品安装器] --> [ensure_local_or_download\n离线优先决策]
+[ensure_local_or_download\n离线优先决策] --> [downloader.py\n下载/重试/磁盘空间]
 [installers.py\n模板方法 + 产品安装器] --> [downloader.py\n下载/重试/磁盘空间]
 [installers.py\n模板方法 + 产品安装器] --> [verifier.py\nOpenSSL 验签]
 [installers.py\n模板方法 + 产品安装器] --> [paths.py\n路径规范]

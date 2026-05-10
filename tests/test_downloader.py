@@ -27,9 +27,31 @@ def test_download_success(monkeypatch, tmp_path):
             return FakeResponse(b"", headers={"Content-Length": "5"})
         return FakeResponse(b"hello", headers={"Content-Length": "5"})
 
-    monkeypatch.setattr("package_manager.downloader.open_url", lambda req_or_url, timeout_seconds: fake_urlopen(req_or_url, timeout_seconds))
+    monkeypatch.setattr(
+        "package_manager.downloader.open_url",
+        lambda req_or_url, timeout_seconds, ssl_verify=False: fake_urlopen(req_or_url, timeout_seconds),
+    )
     download_file("http://x/a.bin", dest, timeout_seconds=5, retry=1)
     assert dest.read_bytes() == b"hello"
+
+
+def test_download_passes_ssl_verify(monkeypatch, tmp_path):
+    dest = tmp_path / "a.bin"
+    ssl_verify_values = []
+
+    def fake_open_url(req_or_url, timeout_seconds, ssl_verify=False):
+        assert timeout_seconds == 5
+        ssl_verify_values.append(ssl_verify)
+        if hasattr(req_or_url, "get_method") and req_or_url.get_method() == "HEAD":
+            return FakeResponse(b"", headers={"Content-Length": "5"})
+        return FakeResponse(b"hello", headers={"Content-Length": "5"})
+
+    monkeypatch.setattr("package_manager.downloader.open_url", fake_open_url)
+
+    download_file("http://x/a.bin", dest, timeout_seconds=5, retry=1, ssl_verify=True)
+
+    assert dest.read_bytes() == b"hello"
+    assert ssl_verify_values == [True, True]
 
 
 def test_download_failure_cleans_tmp(monkeypatch, tmp_path):
@@ -40,7 +62,10 @@ def test_download_failure_cleans_tmp(monkeypatch, tmp_path):
             return FakeResponse(b"", headers={"Content-Length": "5"})
         raise OSError("boom")
 
-    monkeypatch.setattr("package_manager.downloader.open_url", lambda req_or_url, timeout_seconds: fake_urlopen(req_or_url, timeout_seconds))
+    monkeypatch.setattr(
+        "package_manager.downloader.open_url",
+        lambda req_or_url, timeout_seconds, ssl_verify=False: fake_urlopen(req_or_url, timeout_seconds),
+    )
 
     with pytest.raises(DownloadError):
         download_file("http://x/a.bin", dest, timeout_seconds=5, retry=1)
@@ -56,7 +81,10 @@ def test_download_empty_file_raises(monkeypatch, tmp_path):
             return FakeResponse(b"", headers={"Content-Length": "1"})
         return FakeResponse(b"")
 
-    monkeypatch.setattr("package_manager.downloader.open_url", lambda req_or_url, timeout_seconds: fake_urlopen(req_or_url, timeout_seconds))
+    monkeypatch.setattr(
+        "package_manager.downloader.open_url",
+        lambda req_or_url, timeout_seconds, ssl_verify=False: fake_urlopen(req_or_url, timeout_seconds),
+    )
 
     with pytest.raises(DownloadError):
         download_file("http://x/a.bin", dest, timeout_seconds=5, retry=1)
@@ -75,7 +103,10 @@ def test_download_insufficient_space_raises(monkeypatch, tmp_path):
         used = 900
         free = 10
 
-    monkeypatch.setattr("package_manager.downloader.open_url", lambda req_or_url, timeout_seconds: fake_urlopen(req_or_url, timeout_seconds))
+    monkeypatch.setattr(
+        "package_manager.downloader.open_url",
+        lambda req_or_url, timeout_seconds, ssl_verify=False: fake_urlopen(req_or_url, timeout_seconds),
+    )
     monkeypatch.setattr("package_manager.downloader.shutil.disk_usage", lambda _p: FakeDisk())
 
     with pytest.raises(DownloadError):
@@ -98,7 +129,7 @@ def test_build_ssl_context_supports_extra_ca(monkeypatch, tmp_path):
 
     from package_manager.downloader import build_ssl_context
 
-    ctx = build_ssl_context()
+    ctx = build_ssl_context(ssl_verify=True)
     assert isinstance(ctx, FakeContext)
     assert loaded == [str(extra_ca)]
 

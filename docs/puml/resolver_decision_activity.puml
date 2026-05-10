@@ -14,20 +14,19 @@ endif
 if (filename_override 存在?) then (yes)
   :filename = filename_override;
 else (no)
-  :product_token = filename_product_token(product, format);
   :arch_token = arch_token_for_package(format, runtime_arch);
   if (format == tar.gz?) then (yes)
-    :filename = product_token-artifact_version-arch_token.tar.gz;
+    :filename = product-artifact_version-arch_token.tar.gz;
   else (rpm)
-    :filename = product_token-artifact_version\nrpm_arch_separator+arch_token.rpm;
+    :filename = product-artifact_version\nrpm_arch_separator+arch_token.rpm;
   endif
 endif
 
 :base_url = build_project_base_url(download_defaults.base_url, version);
 :package_url = base_url + '/' + filename;
 :signature_url = package_url + signature_suffix;
-:package_id = product-os-arch-format;
-:package_path/signature_path = download_dir()/package_id/...;
+:artifact_dir = product;
+:package_path/signature_path = download_dir()/artifact_dir/...;
 :输出 ResolvedPackage;
 stop
 

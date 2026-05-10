@@ -63,7 +63,6 @@ def get_installed_version(product: str, path: Optional[Path] = None) -> Optional
 def update_install_state(
     product: str,
     version: str,
-    package_id: str,
     package_format: str,
     path: Optional[Path] = None,
 ) -> None:
@@ -75,7 +74,6 @@ def update_install_state(
     products[product] = {
         "installed_version": version,
         "installed_at": datetime.now(timezone.utc).isoformat(),
-        "package_id": package_id,
         "package_format": package_format,
         "last_result": "success",
     }

@@ -7,18 +7,16 @@
 4. 以受控方式抛出 `ConfigError`，避免原始异常泄漏到调用栈
 """
 
-import os
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+import yaml
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from package_manager.constants import OS_LINUX, PKG_FMT_RPM, PKG_FMT_TAR_GZ
 from package_manager.errors import ConfigError
 from package_manager.models import DownloadDefaults, PackageConfig, VerifyDefaults
-from package_manager.paths import app_dir, project_root
-
-PACKAGE_VERSION = "26.0.RC1"
-CONFIG_FILE_ENV = "PACKAGE_MANAGER_CONFIG_FILE"
-DEFAULT_CONFIG_RELATIVE = Path("config") / "packages.yaml"
+from package_manager.paths import runtime_config_path
 
 
 @dataclass(frozen=True)
@@ -30,50 +28,148 @@ class RuntimeConfig:
     packages: List[PackageConfig]
 
 
+class DownloadDefaultsNode(BaseModel):
+    """下载默认配置节点。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    base_url: str
+    signature_suffix: str = ".p7s"
+    timeout_seconds: int = 300
+    retry: int = 3
+
+    @field_validator("base_url", "signature_suffix", mode="before")
+    @classmethod
+    def _non_empty_text(cls, value: Any) -> str:
+        text = str(value).strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class VerifyDefaultsNode(BaseModel):
+    """验签默认配置节点。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    signature_type: str = "p7s"
+    signature_format: str = "DER"
+    verify_chain: bool = True
+
+    @field_validator("signature_type", "signature_format", mode="before")
+    @classmethod
+    def _non_empty_text(cls, value: Any) -> str:
+        text = str(value).strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class PackageNode(BaseModel):
+    """包配置节点。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    product: str
+    project_version: str = Field(validation_alias=AliasChoices("project_version", "version"))
+    artifact_version: str
+    package_format: str
+    rpm_arch_separator: str = "-"
+    os: str = OS_LINUX
+    install_dir: str
+    filename_override: Optional[str] = None
+    supported_versions: Optional[List[str]] = None
+    enabled: bool = True
+
+    @field_validator("product", "project_version", "artifact_version", "package_format", "os", "install_dir", mode="before")
+    @classmethod
+    def _required_text(cls, value: Any) -> str:
+        text = str(value).strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+    @field_validator("filename_override", mode="before")
+    @classmethod
+    def _optional_text(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @field_validator("supported_versions", mode="before")
+    @classmethod
+    def _supported_versions_to_list(cls, value: Any) -> Optional[List[str]]:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise ValueError("must be a list")
+        return [str(v).strip() for v in value if str(v).strip()]
+
+    @field_validator("rpm_arch_separator")
+    @classmethod
+    def _valid_rpm_arch_separator(cls, value: str) -> str:
+        if value not in {"-", "."}:
+            raise ValueError("must be '-' or '.'")
+        return value
+
+    @field_validator("package_format")
+    @classmethod
+    def _valid_package_format(cls, value: str) -> str:
+        if value not in {PKG_FMT_RPM, PKG_FMT_TAR_GZ}:
+            raise ValueError(f"must be '{PKG_FMT_RPM}' or '{PKG_FMT_TAR_GZ}'")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_supported_versions(self) -> "PackageNode":
+        supported = self.supported_versions or []
+        if supported and self.project_version not in supported:
+            raise ValueError(
+                f"Configured project version '{self.project_version}' is not in supported_versions for product '{self.product}'"
+            )
+        return self
+
+
+class ConfigNode(BaseModel):
+    """根配置节点。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    download_defaults: DownloadDefaultsNode
+    verify_defaults: VerifyDefaultsNode
+    packages: List[PackageNode]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _forbid_field_aliases(cls, data: Any) -> Any:
+        if isinstance(data, Mapping) and "field_aliases" in data:
+            raise ValueError("field_aliases is no longer supported; please use canonical YAML keys")
+        return data
+
+
 _RUNTIME_CONFIG_CACHE: Optional[RuntimeConfig] = None
 
 
-def _load_yaml_module():
-    """加载 PyYAML 模块，缺失时转换为配置错误。"""
+def _format_validation_error(exc: ValidationError) -> str:
+    """格式化 Pydantic 校验错误。"""
 
-    try:
-        import yaml  # type: ignore
-    except ModuleNotFoundError as exc:
-        raise ConfigError("PyYAML is required. Install it with: python -m pip install pyyaml") from exc
-    return yaml
-
-
-def _config_path() -> Path:
-    """解析配置文件路径，优先环境变量，其次打包态，再回退开发态。"""
-
-    configured = os.getenv(CONFIG_FILE_ENV, "").strip()
-    if configured:
-        return Path(configured)
-    frozen_path = app_dir() / DEFAULT_CONFIG_RELATIVE
-    if frozen_path.exists():
-        return frozen_path
-    return project_root() / DEFAULT_CONFIG_RELATIVE
-
-
-def _substitute_tokens(value: Any) -> Any:
-    """递归替换配置里的占位符。"""
-
-    if isinstance(value, str):
-        return value.replace("${PACKAGE_VERSION}", PACKAGE_VERSION)
-    if isinstance(value, list):
-        return [_substitute_tokens(item) for item in value]
-    if isinstance(value, dict):
-        return {k: _substitute_tokens(v) for k, v in value.items()}
-    return value
+    parts: List[str] = []
+    for err in exc.errors(include_url=False):
+        loc = ".".join(str(token) for token in err.get("loc", ()))
+        msg = str(err.get("msg", "validation error"))
+        if loc:
+            parts.append(f"{loc}: {msg}")
+        else:
+            parts.append(msg)
+    return "; ".join(parts)
 
 
 def _load_raw_config() -> Dict[str, Any]:
     """读取并解析 YAML 原始结构。"""
 
-    path = _config_path()
+    path = runtime_config_path()
     if not path.exists():
         raise ConfigError(f"Config file does not exist: {path}")
-    yaml = _load_yaml_module()
     try:
         with path.open("r", encoding="utf-8") as fp:
             parsed = yaml.safe_load(fp) or {}
@@ -83,110 +179,45 @@ def _load_raw_config() -> Dict[str, Any]:
         raise ConfigError(f"Failed to parse YAML config: {path}, error={exc}") from exc
     if not isinstance(parsed, dict):
         raise ConfigError(f"Config file must be a mapping: {path}")
-    return _substitute_tokens(parsed)
-
-
-def _required_str(node: Dict[str, Any], key: str, label: str) -> str:
-    """读取必填字符串字段。"""
-
-    value = node.get(key)
-    if value is None:
-        raise ConfigError(f"Missing required field '{key}' in {label}")
-    text = str(value).strip()
-    if not text:
-        raise ConfigError(f"Field '{key}' in {label} must not be empty")
-    return text
-
-
-def _load_download_defaults(raw: Dict[str, Any]) -> DownloadDefaults:
-    """解析下载默认配置。"""
-
-    node = raw.get("download_defaults")
-    if not isinstance(node, dict):
-        raise ConfigError("download_defaults must be a mapping in YAML config")
-    return DownloadDefaults(
-        base_url=_required_str(node, "base_url", "download_defaults"),
-        signature_suffix=str(node.get("signature_suffix", ".p7s")),
-        timeout_seconds=int(node.get("timeout_seconds", 300)),
-        retry=int(node.get("retry", 3)),
-    )
-
-
-def _load_verify_defaults(raw: Dict[str, Any]) -> VerifyDefaults:
-    """解析验签默认配置。"""
-
-    node = raw.get("verify_defaults")
-    if not isinstance(node, dict):
-        raise ConfigError("verify_defaults must be a mapping in YAML config")
-    return VerifyDefaults(
-        signature_type=str(node.get("signature_type", "p7s")),
-        signature_format=str(node.get("signature_format", "DER")),
-        verify_chain=bool(node.get("verify_chain", True)),
-    )
-
-
-def _normalize_supported_versions(value: Any) -> Tuple[str, ...]:
-    """规范化支持版本列表。"""
-
-    if value is None:
-        return tuple()
-    if not isinstance(value, list):
-        raise ConfigError("supported_versions must be a list")
-    return tuple(str(v) for v in value)
-
-
-def _rpm_arch_separator(item: Dict[str, Any], label: str) -> str:
-    """读取 rpm 架构分隔符，默认 '-'。"""
-
-    raw = str(item.get("rpm_arch_separator", "-"))
-    if raw in {"-", "."}:
-        return raw
-    raise ConfigError(f"{label}.rpm_arch_separator must be '-' or '.'")
-
-
-def _load_packages(raw: Dict[str, Any]) -> List[PackageConfig]:
-    """解析包配置列表。"""
-
-    node = raw.get("packages")
-    if not isinstance(node, list):
-        raise ConfigError("packages must be a list in YAML config")
-    packages: List[PackageConfig] = []
-    for idx, item in enumerate(node):
-        label = f"packages[{idx}]"
-        if not isinstance(item, dict):
-            raise ConfigError(f"{label} must be a mapping")
-        supported_versions = _normalize_supported_versions(item.get("supported_versions"))
-        project_version = _required_str(item, "version", label)
-        artifact_version = _required_str(item, "artifact_version", label)
-        if supported_versions and project_version not in supported_versions:
-            raise ConfigError(
-                f"Configured project version '{project_version}' is not in supported_versions for product '{item.get('product')}'"
-            )
-        packages.append(
-            PackageConfig(
-                product=_required_str(item, "product", label),
-                version=project_version,
-                artifact_version=artifact_version,
-                package_format=_required_str(item, "package_format", label),
-                rpm_arch_separator=_rpm_arch_separator(item, label),
-                os=str(item.get("os", "linux")),
-                filename_override=str(item["filename_override"]) if item.get("filename_override") else None,
-                supported_versions=supported_versions or None,
-                install_dir=str(item["install_dir"]) if item.get("install_dir") else None,
-                enabled=bool(item.get("enabled", True)),
-            )
-        )
-    return packages
+    return parsed
 
 
 def _load_runtime_config() -> RuntimeConfig:
     """加载并构建运行时配置对象。"""
 
     raw = _load_raw_config()
+    try:
+        node = ConfigNode.model_validate(raw)
+    except ValidationError as exc:
+        raise ConfigError(_format_validation_error(exc)) from exc
+
     return RuntimeConfig(
-        download_defaults=_load_download_defaults(raw),
-        verify_defaults=_load_verify_defaults(raw),
-        packages=_load_packages(raw),
+        download_defaults=DownloadDefaults(
+            base_url=node.download_defaults.base_url,
+            signature_suffix=node.download_defaults.signature_suffix,
+            timeout_seconds=node.download_defaults.timeout_seconds,
+            retry=node.download_defaults.retry,
+        ),
+        verify_defaults=VerifyDefaults(
+            signature_type=node.verify_defaults.signature_type,
+            signature_format=node.verify_defaults.signature_format,
+            verify_chain=node.verify_defaults.verify_chain,
+        ),
+        packages=[
+            PackageConfig(
+                product=item.product,
+                version=item.project_version,
+                artifact_version=item.artifact_version,
+                package_format=item.package_format,
+                rpm_arch_separator=item.rpm_arch_separator,
+                os=item.os,
+                install_dir=item.install_dir,
+                filename_override=item.filename_override,
+                supported_versions=tuple(item.supported_versions) if item.supported_versions else None,
+                enabled=item.enabled,
+            )
+            for item in node.packages
+        ],
     )
 
 

@@ -1,0 +1,30 @@
+@startuml
+
+title 关键步骤子流程：版本切换与 pre_check 决策（BaseInstaller.run）
+
+start
+:读取 installed_version;
+:读取 target_version (config.version);
+
+if (installed_version 存在 且 != target_version?) then (yes)
+  :打印版本切换日志;
+  :remove_previous_version(installed_version);
+else (no)
+endif
+
+:pre_check(installed_version);
+if (should_install = false?) then (yes)
+  :打印 skip 原因;
+  :record_install_success();
+  stop
+else (no)
+endif
+
+:进入后续主流程
+prepare -> download -> verify_signature
+-> pre_install -> install
+-> post_install_check -> cleanup_after_success;
+:record_install_success();
+stop
+
+@enduml

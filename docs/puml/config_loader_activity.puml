@@ -41,7 +41,7 @@ else (no)
   stop
 endif
 
-:递归 token 替换 ${PACKAGE_VERSION};
+:读取 field_aliases.package(可选);
 
 if (download_defaults 是 mapping?) then (yes)
 else (no)
@@ -69,7 +69,7 @@ repeat
     stop
   endif
 
-  :读取 product/version/artifact_version/package_format;
+  :读取 product/project_version/artifact_version/package_format;
   if (任一必填字段为空?) then (yes)
     :ConfigError: Missing/empty required field;
     stop

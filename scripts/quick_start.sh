@@ -11,7 +11,7 @@ set -euo pipefail
 # 2) （可选）单元测试
 # 3) 调用 build.sh 完成打包
 # 4) 校验产物结构（_internal/openssl 等）
-# 5) 运行产物（先 --list-packages，再执行安装）
+# 5) 运行产物（按 --name 执行安装）
 #
 # 说明：
 # - 安装路径由 config.py 中每个 PackageConfig.install_dir 决定。
@@ -26,9 +26,7 @@ BUILD_SCRIPT="${ROOT_DIR}/scripts/build.sh"
 # 默认参数
 # -----------------------------
 VERSION="26.0.RC1"
-PRODUCT_NAME="tiancheng"
-PACKAGE_ID=""
-LIST_ONLY="false"
+PRODUCT_NAME="DevKit-Porting-Advisor"
 SKIP_TESTS="false"
 TEST_PORTING_INSTALLERS="false"
 CONTAINER_NAME=""
@@ -45,20 +43,16 @@ Usage:
 
 Options:
   --version <ver>       构建版本号（默认: 26.0.RC1）
-  --name <product>      按产品名安装（默认: tiancheng）
-  --package-id <id>     按 package-id 安装（优先级高于 --name）
-  --list-only           只构建并列包，不执行安装
+  --name <product>      按产品名安装（默认: DevKit-Porting-Advisor）
   --skip-tests          跳过 pytest
-  --test-porting-installers  依次测试 Porting-Advisor 与 devkit-porting 两个 installer
+  --test-porting-installers  依次测试 DevKit-Porting-Advisor 与 devkit-porting 两个 installer
   --container <name>    在指定容器里执行完整 quick_start 测试流程
   --container-no-bootstrap  容器模式下不自动安装 pytest/pyinstaller
   -h, --help            查看帮助
 
 Examples:
   ./scripts/quick_start.sh
-  ./scripts/quick_start.sh --version 26.0.RC1 --name tiancheng
-  ./scripts/quick_start.sh --package-id tiancheng-linux-arm64-tar-gz
-  ./scripts/quick_start.sh --list-only
+  ./scripts/quick_start.sh --version 26.0.RC1 --name DevKit-Porting-Advisor
   ./scripts/quick_start.sh --container openeuler-arm --test-porting-installers
 EOF
 }
@@ -111,16 +105,6 @@ while [[ $# -gt 0 ]]; do
       PRODUCT_NAME="${2:-}"
       FORWARD_ARGS+=("$1" "$2")
       shift 2
-      ;;
-    --package-id)
-      PACKAGE_ID="${2:-}"
-      FORWARD_ARGS+=("$1" "$2")
-      shift 2
-      ;;
-    --list-only)
-      LIST_ONLY="true"
-      FORWARD_ARGS+=("$1")
-      shift
       ;;
     --skip-tests)
       SKIP_TESTS="true"
@@ -202,16 +186,16 @@ fi
 # -----------------------------
 cd "${ROOT_DIR}"
 if [[ "${SKIP_TESTS}" != "true" ]]; then
-  echo "[1/5] 运行单元测试..."
+  echo "[1/4] 运行单元测试..."
   pytest
 else
-  echo "[1/5] 跳过单元测试"
+  echo "[1/4] 跳过单元测试"
 fi
 
 # -----------------------------
 # 2) 构建产物
 # -----------------------------
-echo "[2/5] 执行构建: version=${VERSION}"
+echo "[2/4] 执行构建: version=${VERSION}"
 "${BUILD_SCRIPT}" "${VERSION}"
 
 DIST_DIR="${ROOT_DIR}/dist/package-manager"
@@ -224,7 +208,7 @@ PKG_DIR="${INTERNAL_DIR}/packages"
 # -----------------------------
 # 3) 校验产物结构
 # -----------------------------
-echo "[3/5] 校验产物结构..."
+echo "[3/4] 校验产物结构..."
 for p in "${BIN_PATH}" "${INTERNAL_DIR}" "${OPENSSL_BIN}" "${PEM_PATH}" "${PKG_DIR}"; do
   if [[ ! -e "${p}" ]]; then
     echo "产物缺失: ${p}"
@@ -233,23 +217,11 @@ for p in "${BIN_PATH}" "${INTERNAL_DIR}" "${OPENSSL_BIN}" "${PEM_PATH}" "${PKG_D
 done
 
 # -----------------------------
-# 4) 列包（确认运行时解析结果）
-# -----------------------------
-echo "[4/5] 列出可安装包..."
-"${BIN_PATH}" --list-packages
-
-# list-only 模式直接结束
-if [[ "${LIST_ONLY}" == "true" ]]; then
-  echo "[5/5] 已按 --list-only 结束（未执行安装）"
-  exit 0
-fi
-
-# -----------------------------
-# 5) 执行安装
+# 4) 执行安装
 # -----------------------------
 if [[ "${TEST_PORTING_INSTALLERS}" == "true" ]]; then
-  echo "[5/5] 依次测试两个 installer: Porting-Advisor + devkit-porting"
-  "${BIN_PATH}" --name "Porting-Advisor"
+  echo "[4/4] 依次测试两个 installer: DevKit-Porting-Advisor + devkit-porting"
+  "${BIN_PATH}" --name "DevKit-Porting-Advisor"
   if command -v rpm >/dev/null 2>&1; then
     "${BIN_PATH}" --name "devkit-porting"
   else
@@ -260,14 +232,9 @@ if [[ "${TEST_PORTING_INSTALLERS}" == "true" ]]; then
 fi
 
 INSTALL_CMD=("${BIN_PATH}")
+INSTALL_CMD+=(--name "${PRODUCT_NAME}")
 
-if [[ -n "${PACKAGE_ID}" ]]; then
-  INSTALL_CMD+=(--package-id "${PACKAGE_ID}")
-else
-  INSTALL_CMD+=(--name "${PRODUCT_NAME}")
-fi
-
-echo "[5/5] 执行安装命令: ${INSTALL_CMD[*]}"
+echo "[4/4] 执行安装命令: ${INSTALL_CMD[*]}"
 "${INSTALL_CMD[@]}"
 
 echo "Quick start 完成。"

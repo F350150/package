@@ -20,7 +20,6 @@ def test_update_install_state_then_get_version(tmp_path: Path):
     update_install_state(
         product="demo",
         version="1.2.3",
-        package_id="demo-linux-arm64-rpm",
         package_format="rpm",
         path=state,
     )

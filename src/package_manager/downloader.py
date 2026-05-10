@@ -27,11 +27,11 @@ TLS_CA_FILE_ENV = "PACKAGE_MANAGER_TLS_CA_FILE"
 TLS_INSECURE_ENV = "PACKAGE_MANAGER_TLS_INSECURE"
 
 
-def build_ssl_context() -> ssl.SSLContext:
+def build_ssl_context(ssl_verify: bool = False) -> ssl.SSLContext:
     """构造下载使用的 TLS 上下文。"""
 
-    if os.getenv(TLS_INSECURE_ENV, "").strip().lower() in {"1", "true", "yes"}:
-        print(f"WARNING: {TLS_INSECURE_ENV}=1, TLS certificate verification is disabled")
+    if not ssl_verify or os.getenv(TLS_INSECURE_ENV, "").strip().lower() in {"1", "true", "yes"}:
+        print(f"WARNING: TLS certificate verification is disabled")
         return ssl._create_unverified_context()
 
     context = ssl.create_default_context()
@@ -46,24 +46,24 @@ def build_ssl_context() -> ssl.SSLContext:
     return context
 
 
-def open_url(url_or_request, timeout_seconds: int):
+def open_url(url_or_request, timeout_seconds: int, ssl_verify: bool = False):
     """统一封装 urlopen，确保下载与 HEAD 都使用同一 TLS 配置。"""
 
-    context = build_ssl_context()
+    context = build_ssl_context(ssl_verify)
     return urllib.request.urlopen(url_or_request, timeout=timeout_seconds, context=context)
 
 
-def download_file(url: str, destination: Path, timeout_seconds: int, retry: int) -> None:
+def download_file(url: str, destination: Path, timeout_seconds: int, retry: int, ssl_verify: bool = False) -> None:
     """下载单个文件，失败按 retry 重试。"""
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = temp_path(destination)
-    remote_size = get_remote_file_size(url, timeout_seconds)
+    remote_size = get_remote_file_size(url, timeout_seconds, ssl_verify)
     print_remote_size(url, remote_size)
     if can_skip_download(destination, remote_size):
         return
     ensure_disk_space(destination, remote_size)
-    do_download_with_retry(url, destination, tmp_path, timeout_seconds, retry)
+    do_download_with_retry(url, destination, tmp_path, timeout_seconds, retry, ssl_verify)
 
 
 def temp_path(path: Path) -> Path:
@@ -72,12 +72,12 @@ def temp_path(path: Path) -> Path:
     return Path(f"{path}.tmp")
 
 
-def get_remote_file_size(url: str, timeout_seconds: int) -> Optional[int]:
+def get_remote_file_size(url: str, timeout_seconds: int, ssl_verify: bool = False) -> Optional[int]:
     """通过 HEAD 请求获取 Content-Length。"""
 
     try:
         req = urllib.request.Request(url, method="HEAD")
-        with open_url(req, timeout_seconds) as response:
+        with open_url(req, timeout_seconds, ssl_verify) as response:
             value = response.headers.get("Content-Length")
     except Exception:
         return None
@@ -164,14 +164,21 @@ def warn_if_low_remaining_space(destination: Path, total: int, remaining: int) -
         )
 
 
-def do_download_with_retry(url: str, destination: Path, tmp_path: Path, timeout_seconds: int, retry: int) -> None:
+def do_download_with_retry(
+    url: str,
+    destination: Path,
+    tmp_path: Path,
+    timeout_seconds: int,
+    retry: int,
+    ssl_verify: bool = False,
+) -> None:
     """执行带重试的下载流程。"""
 
     attempts = max(1, retry)
     last_exc = None
     for attempt in range(1, attempts + 1):
         try:
-            download_once(url, destination, tmp_path, timeout_seconds, attempt, attempts)
+            download_once(url, destination, tmp_path, timeout_seconds, attempt, attempts, ssl_verify)
             return
         except Exception as exc:
             last_exc = exc
@@ -187,12 +194,13 @@ def download_once(
     timeout_seconds: int,
     attempt: int,
     attempts: int,
+    ssl_verify: bool = False,
 ) -> None:
     """执行一次下载尝试。"""
 
     cleanup_tmp(tmp_path)
     print(f"Downloading {url} -> {destination} (attempt {attempt}/{attempts})")
-    with open_url(url, timeout_seconds) as response:
+    with open_url(url, timeout_seconds, ssl_verify) as response:
         with tmp_path.open("wb") as dst:
             stream_copy(response, dst, remote_size=read_content_length(response))
     ensure_non_empty(tmp_path, url)

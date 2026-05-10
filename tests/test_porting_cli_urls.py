@@ -11,14 +11,13 @@ def test_porting_cli_framework_url_uses_project_version(tmp_path: Path):
         artifact_version="26.0.rc1-1",
         package_format="rpm",
         rpm_arch_separator=".",
+        install_dir="_internal/porting_cli",
     )
-    package_id = "devkit-porting-linux-arm64-rpm"
     filename = "devkit-porting-26.0.rc1-1.aarch64.rpm"
-    package_dir = tmp_path / "downloads" / package_id
+    package_dir = tmp_path / "downloads" / cfg.product
     package_dir.mkdir(parents=True)
     resolved = ResolvedPackage(
         config=cfg,
-        package_id=package_id,
         runtime_arch="arm64",
         filename=filename,
         package_url=f"https://example.com/base/26.0.RC2/{filename}",

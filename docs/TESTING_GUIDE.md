@@ -43,7 +43,7 @@
    - 文件名使用 `artifact_version`。
    - rpm `-` 分隔符规则。
    - rpm `.` 分隔符规则（devkit 场景）。
-   - Porting-Advisor 产品 token 映射。
+   - product 直接参与文件名拼接（无产品 token 特判）。
 
 2. `tests/test_porting_cli_urls.py`
    - devkit framework 包 URL 必须拼接项目版本目录。
@@ -58,13 +58,13 @@
    - pre_check skip 分支。
 
 2. `tests/test_porting_advisor_layout.py`
-   - Porting-Advisor payload 目录识别。
+   - DevKit-Porting-Advisor payload 目录识别。
    - 运行时成品（config/jre/jar）发布流程。
 
 ### 3.4 服务与入口层
 1. `tests/test_installer_service.py`
-   - 按 name 选择、按 package-id 选择。
-   - name/id 冲突校验。
+   - 仅按 name 选择；缺失 name 或参数不支持时失败。
+   - 空 name 输入校验。
 
 2. `tests/test_main.py`
    - main 到 service 的参数透传。
@@ -82,16 +82,16 @@
 执行脚本：`scripts/e2e_cases.sh`
 
 ### 4.1 场景清单（默认执行）
-1. `S01` Porting-Advisor 首次安装（pre_check 通过）。
-2. `S02` Porting-Advisor 重复安装（pre_check skip）。
+1. `S01` DevKit-Porting-Advisor 首次安装（pre_check 通过）。
+2. `S02` DevKit-Porting-Advisor 重复安装（pre_check skip）。
 3. `S03` devkit-porting 首次安装。
 4. `S04` devkit-porting 重复安装（skip）。
 5. `S05` 项目版本不在 `supported_versions`。
 6. `S06` 旧版本 -> 目标版本（触发切换）。
 7. `S07` 高版本 -> 目标版本（触发切换）。
-8. `S08` Porting-Advisor 成品目录必须包含 `config/jre/sql-analysis-*.jar`。
+8. `S08` DevKit-Porting-Advisor 成品目录必须包含 `config/jre/sql-analysis-*.jar`。
 9. `S09` 成功后下载缓存目录被清理。
-10. `S10` `--name` 与 `--package-id` 冲突。
+10. `S10` 传入不支持的 `--package-id` 参数（argparse 拒绝）。
 11. `S11` install_state YAML 损坏。
 12. `S12` config YAML 损坏。
 13. `S13` 下载 URL 不可达。
@@ -101,6 +101,15 @@
 17. `S18` devkit-porting 目录整理失败分支。
 18. `S19` 根证书缺失分支。
 19. `S20` 清理失败分支（主错误不被清理错误覆盖）。
+20. `S21` DevKit-Porting-Advisor 本地包+签名命中，网络不可达仍可安装。
+21. `S22` DevKit-Porting-Advisor 主包命中，签名缺失可在线补齐。
+22. `S23` DevKit-Porting-Advisor 主包为空文件且网络不可达，提示离线投放路径。
+23. `S24` DevKit-Porting-Advisor 主包缺失且网络不可达，提示离线投放路径。
+24. `S25` devkit-porting（主包/签名/framework/签名）四文件都本地命中，网络不可达仍可安装。
+25. `S26` devkit-porting framework 主包缺失，网络可达可补齐安装。
+26. `S27` devkit-porting framework 主包缺失且网络不可达，提示离线投放路径。
+27. `S28` devkit-porting framework 主包为空文件且网络不可达，提示离线投放路径。
+28. `S29` devkit-porting framework 签名缺失且网络不可达，提示离线投放路径。
 
 说明：`S17` 当前按产品策略显式跳过。
 
@@ -113,12 +122,13 @@
 ## 5. 分支-场景映射矩阵
 | 分支类别 | 分支点 | UT 覆盖 | E2E 覆盖 |
 |---|---|---|---|
-| 入口分支 | list/name/id/冲突 | `test_installer_service.py` | `S10` |
+| 入口分支 | name 必填/不支持参数 | `test_installer_service.py` | `S10` |
 | 配置分支 | YAML 错误/字段缺失/版本约束/rpm 分隔符约束 | `test_config_runtime.py` | `S05`,`S12` |
-| 解析分支 | project/artifact 双版本、rpm 分隔符、产品 token | `test_resolver.py`,`test_porting_cli_urls.py` | `S03` |
+| 解析分支 | project/artifact 双版本、rpm 分隔符、product 直拼 | `test_resolver.py`,`test_porting_cli_urls.py` | `S03` |
 | pre_check 分支 | should_install / skip | `test_installer_flow.py` | `S01`,`S02`,`S03`,`S04`,`S16` |
 | 版本切换分支 | installed != target | `test_installer_flow.py` | `S06`,`S07` |
 | 下载分支 | 成功/失败/重试 | `test_downloader.py` | `S01`,`S03`,`S13` |
+| 离线优先分支 | 本地命中/缺失下载/缺失且不可下载/空文件 | `test_installer_flow.py` | `S21`~`S29` |
 | 验签分支 | 成功/失败/缺根证书 | `test_p7s_verifier.py` | `S14`,`S19` |
 | 安装异常分支 | 安装失败/目录整理失败 | `test_installer_flow.py` | `S18` |
 | 清理分支 | cleanup 成功/失败 | `test_installer_flow.py` | `S09`,`S20` |
@@ -154,7 +164,8 @@ cd /Users/fxl/pycharm_projects/package
 1. summary 中 `failed=0`。
 2. 所有场景退出码与预期一致。
 3. S08/S09 文件系统断言通过。
-4. 关键异常场景（S13/S14/S18/S19/S20）日志包含预期关键字。
+4. 关键异常场景（S13/S14/S18/S19/S20/S23/S24/S27/S28/S29）日志包含预期关键字。
+5. 离线提示场景日志必须包含 `Offline install hint` 和目标投放路径。
 
 ## 9. 回归建议
 1. 每次改动 `resolver/config/installers` 任一模块时至少跑 UT。

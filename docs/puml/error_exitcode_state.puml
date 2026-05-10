@@ -1,28 +1,34 @@
 @startuml
 
-title 错误到退出码状态图
+title 错误到退出码映射流程图
 
-[*] --> Running
+start
+:执行 main()/installer.run;
 
-Running --> Success : no exception
-Success --> Exit0 : return 0
+if (无异常?) then (yes)
+  :返回 0;
+  stop
+else (no)
+endif
 
-Running --> ConfigError : ConfigError
-ConfigError --> Exit10 : exit_code=10
-
-Running --> DownloadError : DownloadError
-DownloadError --> Exit20 : exit_code=20
-
-Running --> SignatureVerifyError : SignatureVerifyError
-SignatureVerifyError --> Exit40 : exit_code=40
-
-Running --> InstallError : InstallError
-InstallError --> Exit50 : exit_code=50
-
-Running --> CleanupError : CleanupError
-CleanupError --> Exit60 : exit_code=60
-
-Running --> UnknownException : non-InstallerError
-UnknownException --> Exit1 : main() fallback
+if (异常是 ConfigError?) then (yes)
+  :返回 10;
+  stop
+elseif (异常是 DownloadError?) then (yes)
+  :返回 20;
+  stop
+elseif (异常是 SignatureVerifyError?) then (yes)
+  :返回 40;
+  stop
+elseif (异常是 InstallError?) then (yes)
+  :返回 50;
+  stop
+elseif (异常是 CleanupError?) then (yes)
+  :返回 60;
+  stop
+else (other)
+  :返回 1 (main() fallback);
+  stop
+endif
 
 @enduml

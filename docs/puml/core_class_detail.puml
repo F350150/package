@@ -1,0 +1,258 @@
+@startuml
+!pragma layout smetana
+skinparam classAttributeIconSize 0
+hide empty members
+
+title package-manager 核心类图（详细结构）
+
+package "入口与编排" {
+  class "main <<module>>" as MainModule {
+    +parse_args(argv) -> argparse.Namespace
+    +main(argv) -> int
+    +normalize_argv(argv) -> List[str]
+  }
+
+  class "service <<module>>" as ServiceModule {
+    +run_with_builtin_config(name) -> int
+    +select_packages(name, runtime) -> List[PackageConfig]
+    +get_packages_by_name(name, packages) -> List[PackageConfig]
+    +run_packages(packages, runtime) -> int
+  }
+}
+
+package "配置与模型" {
+  class RuntimeConfig {
+    +download_defaults: DownloadDefaults
+    +verify_defaults: VerifyDefaults
+    +packages: List[PackageConfig]
+  }
+
+  class DownloadDefaults {
+    +base_url: str
+    +signature_suffix: str
+    +timeout_seconds: int
+    +retry: int
+  }
+
+  class VerifyDefaults {
+    +signature_type: str
+    +signature_format: str
+    +verify_chain: bool
+  }
+
+  class PackageConfig {
+    +product: str
+    +version: str
+    +artifact_version: str
+    +package_format: str
+    +rpm_arch_separator: str
+    +os: str
+    +install_dir: str
+    +filename_override: Optional[str]
+    +supported_versions: Optional[Tuple[str,...]]
+    +enabled: bool
+  }
+
+  class ResolvedPackage {
+    +config: PackageConfig
+    +runtime_arch: str
+    +filename: str
+    +package_url: str
+    +signature_url: str
+    +package_path: Path
+    +signature_path: Path
+  }
+
+  class "config <<module>>" as ConfigModule {
+    +get_runtime_config(reload=False) -> RuntimeConfig
+    -_load_runtime_config() -> RuntimeConfig
+    -_load_raw_config() -> Dict[str,Any]
+  }
+
+  class "PackageNode <<pydantic>>" as PackageNode {
+    +product: str
+    +project_version: str
+    +artifact_version: str
+    +package_format: str
+    +rpm_arch_separator: str
+    +install_dir: str
+    +filename_override: Optional[str]
+    +supported_versions: Optional[List[str]]
+    +enabled: bool
+  }
+
+  class "ConfigNode <<pydantic>>" as ConfigNode {
+    +download_defaults: DownloadDefaultsNode
+    +verify_defaults: VerifyDefaultsNode
+    +packages: List[PackageNode]
+  }
+
+  class "install_state <<module>>" as StateModule {
+    +load_install_state(path=None) -> Dict[str,Any]
+    +get_installed_version(product, path=None) -> Optional[str]
+    +update_install_state(product, version, package_format, path=None) -> None
+  }
+}
+
+package "解析、下载、验签" {
+  class "resolver <<module>>" as ResolverModule {
+    +resolve_package(package, defaults) -> ResolvedPackage
+    +build_filename(package, runtime_arch) -> str
+    +build_project_base_url(base_url_prefix, project_version) -> str
+    +arch_token_for_package(package_format, runtime_arch) -> str
+  }
+
+  class "downloader <<module>>" as DownloaderModule {
+    +download_file(url, destination, timeout_seconds, retry, ssl_verify=False) -> None
+    +get_remote_file_size(url, timeout_seconds, ssl_verify=False) -> Optional[int]
+    +ensure_disk_space(destination, expected_size) -> None
+    +do_download_with_retry(...) -> None
+  }
+
+  class "verifier <<module>>" as VerifierModule {
+    +verify_p7s_detached(package_path, signature_path, root_ca, signature_format, verify_chain) -> None
+    +resolve_openssl_command() -> str
+    +inject_openssl_library_env(env) -> None
+  }
+}
+
+package "安装器" {
+  class PreCheckResult {
+    +should_install: bool
+    +reason: str
+  }
+
+  abstract class BaseInstaller {
+    -resolved: ResolvedPackage
+    -download_defaults: DownloadDefaults
+    -verify_defaults: VerifyDefaults
+    +run() -> None
+    +prepare() -> None
+    +download() -> None
+    +verify_signature() -> None
+    +pre_check(installed_version) -> PreCheckResult
+    +remove_previous_version(installed_version) -> None
+    +install() -> None
+    +post_install_check() -> None
+    +rollback() -> None
+    +cleanup_temp() -> None
+    +cleanup_after_success() -> None
+  }
+
+  class TarGzInstaller {
+    +pre_check(...) -> PreCheckResult
+    +remove_previous_version(...) -> None
+    +install() -> None
+    +post_install_check() -> None
+    +rollback() -> None
+  }
+
+  class RpmInstaller {
+    +rpm_package_name() -> str
+    +pre_check(...) -> PreCheckResult
+    +remove_previous_version(...) -> None
+    +install() -> None
+    +post_install_check() -> None
+    +rollback() -> None
+  }
+
+  class PortingAdvisorTarGzInstaller {
+    +pre_check(...) -> PreCheckResult
+    +install() -> None
+    +post_install_check() -> None
+  }
+
+  class PortingCliRpmInstaller {
+    +download() -> None
+    +verify_signature() -> None
+    +install() -> None
+    -_framework_filename() -> str
+    -_framework_package_url() -> str
+    -_framework_signature_url() -> str
+    -_framework_package_path() -> Path
+    -_framework_signature_path() -> Path
+  }
+
+  class "installers <<module>>" as InstallersModule {
+    +get_installer_class(config) -> Type[BaseInstaller]
+    +ensure_local_or_download(url, destination, timeout_seconds, retry) -> None
+    +resolve_install_dir(resolved) -> Path
+    +install_porting_advisor_runtime_layout(payload_dir, install_dir) -> None
+  }
+}
+
+package "基础设施" {
+  class "paths <<module>>" as PathsModule {
+    +app_dir() -> Path
+    +internal_dir() -> Path
+    +runtime_config_path() -> Path
+    +root_ca_path() -> Path
+    +openssl_bin_path() -> Path
+    +openssl_lib_dir() -> Path
+    +download_dir() -> Path
+    +install_state_path() -> Path
+  }
+
+  class InstallerError {
+    +exit_code: int
+  }
+  class ConfigError
+  class DownloadError
+  class SignatureVerifyError
+  class InstallError
+  class CleanupError
+}
+
+MainModule ..> ServiceModule : 调用
+MainModule ..> InstallerError : 统一异常映射
+
+ServiceModule ..> ConfigModule : 读取 RuntimeConfig
+ServiceModule ..> ResolverModule : 解析包
+ServiceModule ..> InstallersModule : 选择/实例化安装器
+
+ConfigModule ..> ConfigNode : 校验 YAML
+ConfigModule ..> RuntimeConfig : 构建运行时对象
+RuntimeConfig *-- DownloadDefaults
+RuntimeConfig *-- VerifyDefaults
+RuntimeConfig *-- "*" PackageConfig
+ResolvedPackage *-- PackageConfig
+
+ResolverModule ..> PackageConfig
+ResolverModule ..> DownloadDefaults
+ResolverModule ..> ResolvedPackage
+ResolverModule ..> PathsModule : download_dir()
+
+InstallersModule ..> BaseInstaller : 注册与工厂
+BaseInstaller o-- ResolvedPackage
+BaseInstaller o-- DownloadDefaults
+BaseInstaller o-- VerifyDefaults
+BaseInstaller ..> StateModule : 读写安装状态
+BaseInstaller ..> VerifierModule : 验签
+BaseInstaller ..> PathsModule : 根证书/目录
+BaseInstaller ..> DownloaderModule : 下载
+BaseInstaller ..> PreCheckResult
+
+TarGzInstaller --|> BaseInstaller
+RpmInstaller --|> BaseInstaller
+PortingAdvisorTarGzInstaller --|> TarGzInstaller
+PortingCliRpmInstaller --|> RpmInstaller
+
+ConfigError --|> InstallerError
+DownloadError --|> InstallerError
+SignatureVerifyError --|> InstallerError
+InstallError --|> InstallerError
+CleanupError --|> InstallerError
+
+note bottom of PackageConfig
+version = 项目版本（决定下载目录、安装状态）
+artifact_version = 产物版本（决定包文件名）
+install_dir = 必填，安装目标目录唯一来源
+end note
+
+note bottom of BaseInstaller
+模板方法顺序固定：
+prepare -> download -> verify_signature -> install -> post_install_check -> cleanup_after_success
+异常路径统一：rollback_safely + cleanup_temp_safely
+end note
+
+@enduml

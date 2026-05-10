@@ -1,12 +1,13 @@
 """签名验证模块。"""
 
 import os
+import platform
 import subprocess
 from pathlib import Path
 from typing import List
 
 from package_manager.errors import SignatureVerifyError
-from package_manager.paths import openssl_bin_path
+from package_manager.paths import openssl_bin_path, openssl_lib_dir
 
 
 def verify_p7s_detached(
@@ -80,10 +81,12 @@ def base_command(package_path: Path, signature_path: Path, inform: str) -> List[
 
 
 def resolve_openssl_command() -> str:
-    """优先使用内置 openssl，找不到则回退系统 openssl。"""
+    """返回内置 openssl 命令路径，缺失则抛错。"""
 
     path = openssl_bin_path()
-    return str(path) if path.exists() else "openssl"
+    if not path.exists():
+        raise SignatureVerifyError(f"Built-in openssl does not exist: {path}")
+    return str(path)
 
 
 def run_verify_command(cmd: List[str], package_path: Path, signature_path: Path) -> None:
@@ -92,6 +95,7 @@ def run_verify_command(cmd: List[str], package_path: Path, signature_path: Path)
     print(f"Running OpenSSL verify command for package={package_path} signature={signature_path}")
     env = os.environ.copy()
     env["OPENSSL_CONF"] = "/dev/null"
+    inject_openssl_library_env(env)
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     print(f"OpenSSL return code: {result.returncode}")
     if result.stderr:
@@ -102,3 +106,15 @@ def run_verify_command(cmd: List[str], package_path: Path, signature_path: Path)
     raise SignatureVerifyError(
         f"P7S verification failed for {package_path}, returncode={result.returncode}, stderr={stderr}"
     )
+
+
+def inject_openssl_library_env(env: dict) -> None:
+    """注入内置 openssl 动态库路径，避免链接到宿主环境库。"""
+
+    lib_dir = openssl_lib_dir()
+    if not lib_dir.exists():
+        raise SignatureVerifyError(f"Built-in openssl lib directory does not exist: {lib_dir}")
+
+    loader_key = "DYLD_LIBRARY_PATH" if platform.system().lower() == "darwin" else "LD_LIBRARY_PATH"
+    previous = str(env.get(loader_key, "")).strip()
+    env[loader_key] = f"{lib_dir}:{previous}" if previous else str(lib_dir)

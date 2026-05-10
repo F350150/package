@@ -11,8 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Type
 
+from package_manager.constants import PKG_FMT_RPM, PKG_FMT_TAR_GZ, PRODUCT_PORTING_ADVISOR, PRODUCT_PORTING_CLI
 from package_manager.downloader import download_file
-from package_manager.errors import CleanupError, ConfigError, InstallError, InstallerError
+from package_manager.errors import CleanupError, ConfigError, DownloadError, InstallError, InstallerError
 from package_manager.install_state import get_installed_version, update_install_state
 from package_manager.models import DownloadDefaults, PackageConfig, ResolvedPackage, VerifyDefaults
 from package_manager.paths import app_dir, internal_dir, root_ca_path
@@ -43,7 +44,7 @@ class BaseInstaller(ABC):
     def run(self) -> None:
         """按固定模板执行安装。"""
 
-        print(f"Installer run started: package_id={self.resolved.package_id}")
+        print(f"Installer run started: {self._log_identity()}")
         installed_version = self.recorded_installed_version()
         target_version = self.resolved.config.version
         if installed_version and installed_version != target_version:
@@ -56,7 +57,7 @@ class BaseInstaller(ABC):
         precheck = self.pre_check(installed_version)
         if not precheck.should_install:
             reason = precheck.reason or "already installed"
-            print(f"Installer pre-check hit, skip installation: package_id={self.resolved.package_id}, reason={reason}")
+            print(f"Installer pre-check hit, skip installation: {self._log_identity()}, reason={reason}")
             self.record_install_success()
             return
         try:
@@ -68,14 +69,14 @@ class BaseInstaller(ABC):
             self.post_install_check()
             self.cleanup_after_success()
             self.record_install_success()
-            print(f"Installer run completed: package_id={self.resolved.package_id}")
+            print(f"Installer run completed: {self._log_identity()}")
         except InstallerError:
-            print(f"Installer run failed: package_id={self.resolved.package_id}")
+            print(f"Installer run failed: {self._log_identity()}")
             self.rollback_safely()
             self.cleanup_temp_safely()
             raise
         except Exception as exc:
-            print(f"Installer run failed: package_id={self.resolved.package_id}")
+            print(f"Installer run failed: {self._log_identity()}")
             self.rollback_safely()
             self.cleanup_temp_safely()
             raise InstallError(f"Unhandled installer exception: {exc}") from exc
@@ -91,7 +92,6 @@ class BaseInstaller(ABC):
         update_install_state(
             product=self.resolved.config.product,
             version=self.resolved.config.version,
-            package_id=self.resolved.package_id,
             package_format=self.resolved.config.package_format,
         )
 
@@ -111,7 +111,7 @@ class BaseInstaller(ABC):
     def download_package(self) -> None:
         """下载主包文件。"""
 
-        download_file(
+        ensure_local_or_download(
             self.resolved.package_url,
             self.resolved.package_path,
             self.download_defaults.timeout_seconds,
@@ -121,7 +121,7 @@ class BaseInstaller(ABC):
     def download_signature(self) -> None:
         """下载签名文件。"""
 
-        download_file(
+        ensure_local_or_download(
             self.resolved.signature_url,
             self.resolved.signature_path,
             self.download_defaults.timeout_seconds,
@@ -183,18 +183,23 @@ class BaseInstaller(ABC):
 
         try:
             self.rollback()
-            print(f"rollback completed for package_id={self.resolved.package_id}")
+            print(f"rollback completed for {self._log_identity()}")
         except Exception:
-            print(f"rollback failed for package_id={self.resolved.package_id}")
+            print(f"rollback failed for {self._log_identity()}")
 
     def cleanup_temp_safely(self) -> None:
         """安全清理临时文件，不让异常中断主错误链。"""
 
         try:
             self.cleanup_temp()
-            print(f"cleanup temp completed for package_id={self.resolved.package_id}")
+            print(f"cleanup temp completed for {self._log_identity()}")
         except Exception:
-            print(f"cleanup temp failed for package_id={self.resolved.package_id}")
+            print(f"cleanup temp failed for {self._log_identity()}")
+
+    def _log_identity(self) -> str:
+        """返回用于日志的安装目标标识。"""
+
+        return f"filename={self.resolved.filename}"
 
 
 class TarGzInstaller(BaseInstaller):
@@ -286,14 +291,6 @@ class RpmInstaller(BaseInstaller):
         raise InstallError(f"rpm package not installed: {self.rpm_package_name()}")
 
 
-class TianchengTarGzInstaller(TarGzInstaller):
-    """天成 tar.gz 安装器（当前沿用通用逻辑）。"""
-
-
-class TianchengRpmInstaller(RpmInstaller):
-    """天成 rpm 安装器（当前沿用通用逻辑）。"""
-
-
 class PortingAdvisorTarGzInstaller(TarGzInstaller):
     """Porting Advisor 安装器。"""
 
@@ -330,7 +327,7 @@ class PortingAdvisorTarGzInstaller(TarGzInstaller):
         install_dir = resolve_install_dir(self.resolved)
         if has_porting_advisor_runtime_layout(install_dir):
             return
-        raise InstallError(f"Porting-Advisor install validation failed under {install_dir}")
+        raise InstallError(f"{PRODUCT_PORTING_ADVISOR} install validation failed under {install_dir}")
 
 
 class PortingCliRpmInstaller(RpmInstaller):
@@ -385,8 +382,18 @@ class PortingCliRpmInstaller(RpmInstaller):
         """除主包外额外下载 framework 包及签名。"""
 
         super().download()
-        download_file(self._framework_package_url(), self._framework_package_path(), self.download_defaults.timeout_seconds, self.download_defaults.retry)
-        download_file(self._framework_signature_url(), self._framework_signature_path(), self.download_defaults.timeout_seconds, self.download_defaults.retry)
+        ensure_local_or_download(
+            self._framework_package_url(),
+            self._framework_package_path(),
+            self.download_defaults.timeout_seconds,
+            self.download_defaults.retry,
+        )
+        ensure_local_or_download(
+            self._framework_signature_url(),
+            self._framework_signature_path(),
+            self.download_defaults.timeout_seconds,
+            self.download_defaults.retry,
+        )
 
     def verify_signature(self) -> None:
         """验签主包与 framework 包。"""
@@ -433,10 +440,8 @@ class PortingCliRpmInstaller(RpmInstaller):
 
 
 INSTALLER_REGISTRY: Dict[InstallerKey, Type[BaseInstaller]] = {
-    ("tiancheng", "tar.gz"): TianchengTarGzInstaller,
-    ("tiancheng", "rpm"): TianchengRpmInstaller,
-    ("Porting-Advisor", "tar.gz"): PortingAdvisorTarGzInstaller,
-    ("devkit-porting", "rpm"): PortingCliRpmInstaller,
+    (PRODUCT_PORTING_ADVISOR, PKG_FMT_TAR_GZ): PortingAdvisorTarGzInstaller,
+    (PRODUCT_PORTING_CLI, PKG_FMT_RPM): PortingCliRpmInstaller,
 }
 
 
@@ -495,6 +500,22 @@ def run_rpm_command(args):
         return subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError as exc:
         raise InstallError("rpm command not found in PATH on current host") from exc
+
+
+def ensure_local_or_download(url: str, destination: Path, timeout_seconds: int, retry: int) -> None:
+    """优先使用本地文件；缺失时下载；下载失败时给出离线投放路径。"""
+
+    if destination.exists() and destination.is_file() and destination.stat().st_size > 0:
+        print(f"Use local artifact file: {destination}")
+        return
+    try:
+        download_file(url, destination, timeout_seconds, retry)
+    except DownloadError as exc:
+        target_dir = destination.parent
+        raise DownloadError(
+            f"{exc}. Offline install hint: place file at '{destination}' "
+            f"(directory: '{target_dir}') and rerun."
+        ) from exc
 
 
 def has_porting_advisor_runtime_layout(path: Path) -> bool:
@@ -572,15 +593,15 @@ def first_child_dir_match(path: Path, pattern: str) -> Path:
 def resolve_install_dir(resolved: ResolvedPackage) -> Path:
     """解析安装目录。
 
-    优先级：
-    1. config.install_dir（绝对路径直接使用；相对路径基于 app_dir）
-    2. 默认 internal_dir/products/<product>
+    仅使用 config.install_dir：
+    1. 绝对路径直接使用
+    2. 相对路径基于 app_dir
     """
 
-    configured = resolved.config.install_dir
-    if configured:
-        configured_path = Path(configured)
-        if configured_path.is_absolute():
-            return configured_path
-        return app_dir() / configured_path
-    return internal_dir() / "products" / resolved.config.product
+    configured = (resolved.config.install_dir or "").strip()
+    if not configured:
+        raise ConfigError(f"install_dir must be configured for product={resolved.config.product}")
+    configured_path = Path(configured)
+    if configured_path.is_absolute():
+        return configured_path
+    return app_dir() / configured_path

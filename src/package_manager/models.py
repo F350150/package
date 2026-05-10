@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
+from package_manager.constants import OS_LINUX
+
 
 @dataclass(frozen=True)
 class DownloadDefaults:
@@ -39,14 +41,13 @@ class PackageConfig:
     product: str
     version: str
     artifact_version: str
-    package_format: str  # 仅支持: "rpm" | "tar.gz"
+    package_format: str
     rpm_arch_separator: str = "-"
-    os: str = "linux"
+    os: str = OS_LINUX
+    # 安装目录：支持绝对路径或相对 app_dir 的相对路径（运行时强制必填）。
+    install_dir: str = ""
     filename_override: Optional[str] = None
     supported_versions: Optional[Tuple[str, ...]] = None
-    # 安装目录：支持绝对路径或相对 app_dir 的相对路径。
-    # 为空时走默认路径（_internal/products/<product>）。
-    install_dir: Optional[str] = None
     enabled: bool = True
 
 
@@ -55,7 +56,6 @@ class ResolvedPackage:
     """解析后的可执行下载与安装信息。"""
 
     config: PackageConfig
-    package_id: str
     runtime_arch: str
     filename: str
     package_url: str

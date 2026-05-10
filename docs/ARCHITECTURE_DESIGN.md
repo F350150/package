@@ -1,295 +1,926 @@
-# package-manager 详细设计文档（分支审计版）
+# package-manager 详细设计文档
 
-## 1. 文档定位
-本文档用于“设计审计”和“分支完整性审计”，目标是让评审者可以直接回答：
-1. 编译期与运行期每个关键分支是否都被明确设计。
-2. 每个分支的设计意图是否合理。
-3. 每个分支是否有可执行的覆盖场景（UT/E2E）。
+## 一、整体流程
 
-## 2. 总体设计意图
-### 2.1 一致性目标
-1. 所有产品遵循统一模板流程：解析 -> 下载 -> 验签 -> 安装 -> 清理 -> 状态更新。
-2. 错误统一映射稳定退出码，避免非预期 traceback 泄漏。
-3. 版本语义拆分明确，避免“项目目录版本”和“包文件版本”混淆。
+### 1.1 总流程
 
-### 2.2 可扩展性目标
-1. 新产品优先通过 YAML 增量接入，不要求改核心流程。
-2. 命名差异优先配置化（如 `rpm_arch_separator`），减少硬编码特判。
-3. 特殊安装逻辑只放在产品子类，通用能力保留在中间父类。
+#### 1.1.1 流程图
 
-### 2.3 鲁棒性目标
-1. 下载具备重试、空间预判、原子替换。
-2. 验签失败、下载失败、安装失败都应落在受控异常。
-3. 回滚与清理不能覆盖主错误原因。
+```puml
+@startuml
 
-## 3. 关键数据契约
-### 3.1 PackageConfig 语义
-1. `product`：产品标识。
-2. `version`：项目版本（project version）。
-3. `artifact_version`：产物版本（包文件名使用）。
-4. `package_format`：`rpm` 或 `tar.gz`。
-5. `rpm_arch_separator`：rpm 文件名中版本与架构分隔符，支持 `-` 或 `.`。
-6. `supported_versions`：允许的项目版本白名单。
-7. `install_dir`：安装路径。
-8. `enabled`：开关。
+title 运行期整体流程图
 
-### 3.2 URL 组装契约
-1. `download_defaults.base_url` 只包含固定前缀，不包含项目版本尾段。
-2. 运行时 URL 组装规则：`base_url + project_version + filename`。
-3. framework 包（devkit）与主包必须使用同一项目版本目录。
+start
 
-### 3.3 状态文件契约
-1. 文件：`.package-manager/.install_state.yaml`。
-2. 结构：`products.<product>.installed_version/...`。
-3. `installed_version` 存的是项目版本，用于版本切换判断。
+:接收安装请求（name）;
+if (输入有效?) then (是)
+else (否)
+  :配置错误退出;
+  stop
+endif
 
-## 4. 架构与流程图索引
-### 4.1 组件与总流程
-1. [architecture_component.puml](/Users/fxl/pycharm_projects/package/docs/puml/architecture_component.puml)
-2. [cli_to_install_sequence.puml](/Users/fxl/pycharm_projects/package/docs/puml/cli_to_install_sequence.puml)
-3. [installer_template_activity.puml](/Users/fxl/pycharm_projects/package/docs/puml/installer_template_activity.puml)
-4. [resolver_decision_activity.puml](/Users/fxl/pycharm_projects/package/docs/puml/resolver_decision_activity.puml)
+:加载并校验运行配置;
+if (配置可用?) then (是)
+else (否)
+  :配置错误退出;
+  stop
+endif
 
-### 4.2 编译期与子流程
-1. [build_pipeline_activity.puml](/Users/fxl/pycharm_projects/package/docs/puml/build_pipeline_activity.puml)
-2. [config_loader_activity.puml](/Users/fxl/pycharm_projects/package/docs/puml/config_loader_activity.puml)
-3. [downloader_activity.puml](/Users/fxl/pycharm_projects/package/docs/puml/downloader_activity.puml)
-4. [verifier_activity.puml](/Users/fxl/pycharm_projects/package/docs/puml/verifier_activity.puml)
-5. [porting_advisor_installer_activity.puml](/Users/fxl/pycharm_projects/package/docs/puml/porting_advisor_installer_activity.puml)
-6. [porting_cli_rpm_installer_activity.puml](/Users/fxl/pycharm_projects/package/docs/puml/porting_cli_rpm_installer_activity.puml)
-7. [error_exitcode_state.puml](/Users/fxl/pycharm_projects/package/docs/puml/error_exitcode_state.puml)
+:按 name 选择目标产品;
+if (命中可安装产品?) then (是)
+else (否)
+  :配置错误退出;
+  stop
+endif
 
-## 5. 编译期设计（build.sh）
-### 5.1 设计意图
-1. 将运行依赖固化到 `dist/package-manager/_internal`，避免运行期依赖宿主环境差异。
-2. 将根证书转为 PEM 并与内置 openssl 一起分发，保证验签链路可用。
-3. 用 PyInstaller 生成独立可执行目录，屏蔽 Python 运行环境差异。
+:解析目标包信息
+(架构/文件名/下载地址/本地缓存路径);
+if (解析成功?) then (是)
+else (否)
+  :配置错误退出;
+  stop
+endif
 
-### 5.2 编译期分支清单
-| 分支ID | 条件 | 设计意图 | 结果 |
+:读取已安装状态;
+if (检测到版本切换?) then (是)
+  :清理旧版本;
+else (否)
+endif
+
+:执行 pre-check;
+if (满足跳过条件?) then (是)
+  :刷新成功状态;
+  :成功退出;
+  stop
+else (否)
+endif
+
+:准备安装环境;
+
+:获取主包与签名
+(本地命中优先, 否则下载);
+if (获取失败?) then (是)
+  :下载错误退出
+(附离线投放提示);
+  stop
+else (否)
+endif
+
+if (存在附加依赖包?) then (是)
+  :获取附加依赖包与签名;
+  if (获取失败?) then (是)
+    :下载错误退出
+(附离线投放提示);
+    stop
+  else (否)
+  endif
+else (否)
+endif
+
+:执行签名校验;
+if (验签通过?) then (是)
+else (否)
+  :验签错误退出;
+  stop
+endif
+
+:执行安装;
+if (安装成功?) then (是)
+else (否)
+  :回滚与临时清理;
+  :安装错误退出;
+  stop
+endif
+
+:安装后校验;
+if (校验通过?) then (是)
+else (否)
+  :回滚与临时清理;
+  :安装错误退出;
+  stop
+endif
+
+:清理下载缓存;
+if (清理成功?) then (是)
+  :写入成功状态;
+  :成功退出;
+  stop
+else (否)
+  :清理错误退出;
+  stop
+endif
+
+@enduml
+```
+
+#### 1.1.2 流程图解释
+
+配置文件
+
+```yaml
+download_defaults:
+  base_url: "https://kunpeng-repo.obs.cn-north-4.myhuaweicloud.com/Kunpeng%20DevKit/Kunpeng%20DevKit%20"
+  signature_suffix: ".p7s"
+  timeout_seconds: 300
+  retry: 3
+
+verify_defaults:
+  signature_type: "p7s"
+  signature_format: "DER"
+  verify_chain: true
+
+packages:
+  # 可选字段示例（按需开启）：
+  # filename_override: "custom-file-name.tar.gz"
+  # 用途：当上游包名不符合默认拼接规则时，显式指定完整文件名。
+  - product: "DevKit-Porting-Advisor"
+    project_version: "26.0.RC1"
+    artifact_version: "26.0.RC1"
+    supported_versions:
+      - "26.0.RC1"
+    package_format: "tar.gz"
+    install_dir: "_internal/porting_cli"
+    enabled: true
+```
+
+1. 读取并解析配置文件
+2. 根据当前运行架构、版本号等信息获取文件名，并根据文件名根baseurl获取包及签名下载链接
+3. 执行安装流程
+   1. 读取安装状态 `installed_version`
+   2. 若检测版本切换，先执行旧版本删除
+   3. 执行 pre-check 判断是否跳过
+   4. 需要安装时：下载（离线优先）-> 验签 -> 安装 -> 安装后校验 -> 清理
+   5. 成功后写入 `.package-manager/.install_state.yaml`
+   6. 任何异常走统一处理：回滚、临时目录安全清理、映射退出码
+
+### 1.3 关键分支总览（总流程级）
+
+| 分支域 | 关键决策点 | 结果 |
+|---|---|---|
+| 参数分支 | 未提供 `--name` | `ConfigError(10)` |
+| 选包分支 | `--name` 不匹配启用项 | `ConfigError(10)` |
+| 解析分支 | 架构不支持 | `ConfigError(10)` |
+| 解析分支 | `filename_override` 存在 | 优先使用 override 文件名 |
+| 离线分支 | 本地文件存在且非空 | 直接复用，不下载 |
+| 下载分支 | 网络失败且重试耗尽 | `DownloadError(20)` + 离线提示 |
+| 验签分支 | 根证书缺失或验签失败 | `SignatureVerifyError(40)` |
+| pre-check 分支 | 同版本且结构完整 | 跳过安装并刷新成功状态 |
+| 版本切换分支 | `installed_version != target version` | 先清理旧版本 |
+| 未知异常分支 | 非 `InstallerError` | 包装为 `InstallError(50)` |
+
+---
+
+## 二、模块设计
+
+### 2.1 部署结构（构建产物结构）
+
+#### 2.1.1 构建后目录结构server
+
+```text
+├── server                   # 主程序可执行文件
+├── config/
+│   └── packages.yaml                 # 构建期渲染后的运行配置
+├── .package-manager/                 # 运行时隐藏状态目录（首次成功安装后生成）
+│   └── .install_state.yaml           # 已安装版本/安装结果记录
+└── _internal/
+    ├── openssl/
+    │   ├── bin/openssl              # openssl 可执行文件
+    │   ├── lib/                     # libssl/libcrypto 动态库
+    │   └── pems/
+    │       └── huawei_integrity_root_ca_g2.pem # 验签根证书文件
+    └── packages/                    # 下载缓存目录（运行时使用，成功后清理）
+```
+
+#### 2.1.2 部署项职责说明
+
+| 路径 | 类型 | 作用 | 运行期是否必需 |
 |---|---|---|---|
-| C-B01 | 构建参数缺失 | 防止未知默认版本 | 输出用法并退出 1 |
-| C-B02 | `openssl` 不存在 | 验签依赖前置保障 | 退出 1 |
-| C-B03 | `pyinstaller` 不存在 | 打包依赖前置保障 | 退出 1 |
-| C-B04 | canonical DER 不存在但 fallback 存在 | 兼容旧文件名 | 自动复制 fallback |
-| C-B05 | 两个 DER 都不存在 | 不允许无根证书产物 | 退出 1 |
-| C-B06 | `PACKAGE_VERSION` 已相同 | 避免无意义写文件 | 跳过更新 |
-| C-B07 | `PACKAGE_VERSION` 不同 | 对齐构建版本 | 修改 `config.py` 常量 |
-| C-B08 | PyInstaller 失败 | 阻断坏产物 | 退出非0 |
-| C-B09 | 复制 openssl 动态库存在/不存在 | 兼容不同平台 | 存在则拷贝，不存在则跳过 |
-| C-B10 | 产物组装完成 | 运行期可执行保障 | 输出产物路径 |
+| `dist/package-manager/package-manager` | 可执行文件 | CLI 入口与完整安装编排 | 是 |
+| `dist/package-manager/config/packages.yaml` | 配置 | 定义产品、版本、下载默认项、验签默认项 | 是 |
+| `dist/package-manager/_internal/openssl/bin/openssl` | 二进制 | 验签命令执行体 | 是 |
+| `dist/package-manager/_internal/openssl/lib/*` | 动态库 | 保证 openssl 使用内置 libssl/libcrypto | 是 |
+| `dist/package-manager/_internal/openssl/pems/huawei_integrity_root_ca_g2.pem` | 证书 | 证书链校验根证书 | 是（verify_chain=true） |
+| `dist/package-manager/_internal/packages/` | 目录 | 下载缓存与离线投放目录 | 是 |
+| `dist/package-manager/_internal/porting_cli/` | 安装目标目录（示例） | 某些产品安装成品输出目录 | 按配置决定 |
 
-### 5.3 编译期风险与约束
-1. 当前动态库拷贝清单偏向 macOS 命名（`*.dylib`），Linux 上依赖系统动态链接解析。
-2. 若需完全离线运行，可扩展 Linux `*.so` 复制策略并增加产物校验。
+### 2.2 代码结构（仅 src）
 
-## 6. 运行期总流程设计
-### 6.1 CLI 编排层意图
-1. 入口参数保持极简，只暴露 name/id/list 三种用户模型。
-2. 所有业务失败由 `InstallerError` 子类承载，映射固定退出码。
+#### 2.2.1 文件级职责表
 
-### 6.2 运行期全局分支
-| 分支ID | 条件 | 设计意图 | 结果 |
+| 文件 | 角色 | 主要职责 | 不负责内容 |
 |---|---|---|---|
-| R-B01 | `--list-packages` | 只读检查，不触发副作用 | 列包并退出 0 |
-| R-B02 | 同时传 `--name` 和 `--package-id` | 防止选择歧义 | `ConfigError(10)` |
-| R-B03 | `--name` 无匹配启用项 | 快速反馈配置问题 | `ConfigError(10)` |
-| R-B04 | `--package-id` 无匹配 | 避免误装 | `ConfigError(10)` |
-| R-B05 | 全量安装模式 | 默认行为可预测 | 遍历 enabled packages |
+| `src/package_manager/main.py` | CLI 入口 | 参数解析、统一异常映射、退出码返回 | 业务安装逻辑 |
+| `src/package_manager/service.py` | 编排层 | 配置加载、按 name 选包、调度安装器 | 文件下载/验签细节 |
+| `src/package_manager/config.py` | 配置层 | YAML 读取、Pydantic 校验、RuntimeConfig 构建与缓存 | 安装流程执行 |
+| `src/package_manager/models.py` | 模型层 | 运行时 dataclass 数据契约 | I/O 与业务判断 |
+| `src/package_manager/constants.py` | 常量层 | 架构、包格式、产品名等常量统一定义 | 业务流程 |
+| `src/package_manager/paths.py` | 路径层 | 打包态/开发态路径解析、内部目录定位 | 业务逻辑 |
+| `src/package_manager/resolver.py` | 解析层 | 架构识别、文件名规则、下载 URL/本地路径解析 | 下载传输 |
+| `src/package_manager/downloader.py` | 下载层 | HEAD 探测、磁盘预检、重试下载、原子替换 | 产品安装语义 |
+| `src/package_manager/verifier.py` | 安全层 | P7S detached 验签、内置 openssl 调用、库路径注入 | 下载与解压 |
+| `src/package_manager/install_state.py` | 状态层 | `.install_state.yaml` 读取/更新/原子写 | 包解析与安装 |
+| `src/package_manager/installers.py` | 安装器层 | 模板方法、产品子类、离线优先策略、回滚清理 | CLI 参数处理 |
+| `src/package_manager/errors.py` | 错误契约层 | 统一错误类型和退出码 | 业务执行 |
+| `src/package_manager/build_config_renderer.py` | 构建期工具 | 模板 YAML 渲染（替换 `${PACKAGE_VERSION}`） | 运行期安装 |
 
-## 7. 配置加载与校验设计（config.py）
-### 7.1 设计意图
-1. 配置错误尽早暴露，避免进入执行态后才失败。
-2. 支持“打包态配置覆盖开发态配置”。
-3. token 替换只做纯文本替换，不做表达式计算，降低复杂度。
 
-### 7.2 分支清单
-| 分支ID | 条件 | 结果 |
+### 2.3 类图及文字描述
+
+#### 2.3.1 类图
+
+```plantuml
+@startuml
+!pragma layout smetana
+skinparam classAttributeIconSize 0
+hide empty members
+
+title package-manager 核心类图（详细结构）
+
+package "入口与编排" {
+  class "main <<module>>" as MainModule {
+    +parse_args(argv) -> argparse.Namespace
+    +main(argv) -> int
+    +normalize_argv(argv) -> List[str]
+  }
+
+  class "service <<module>>" as ServiceModule {
+    +run_with_builtin_config(name) -> int
+    +select_packages(name, runtime) -> List[PackageConfig]
+    +get_packages_by_name(name, packages) -> List[PackageConfig]
+    +run_packages(packages, runtime) -> int
+  }
+}
+
+package "配置与模型" {
+  class RuntimeConfig {
+    +download_defaults: DownloadDefaults
+    +verify_defaults: VerifyDefaults
+    +packages: List[PackageConfig]
+  }
+
+  class DownloadDefaults {
+    +base_url: str
+    +signature_suffix: str
+    +timeout_seconds: int
+    +retry: int
+  }
+
+  class VerifyDefaults {
+    +signature_type: str
+    +signature_format: str
+    +verify_chain: bool
+  }
+
+  class PackageConfig {
+    +product: str
+    +version: str
+    +artifact_version: str
+    +package_format: str
+    +rpm_arch_separator: str
+    +os: str
+    +install_dir: str
+    +filename_override: Optional[str]
+    +supported_versions: Optional[Tuple[str,...]]
+    +enabled: bool
+  }
+
+  class ResolvedPackage {
+    +config: PackageConfig
+    +runtime_arch: str
+    +filename: str
+    +package_url: str
+    +signature_url: str
+    +package_path: Path
+    +signature_path: Path
+  }
+
+  class "config <<module>>" as ConfigModule {
+    +get_runtime_config(reload=False) -> RuntimeConfig
+    -_load_runtime_config() -> RuntimeConfig
+    -_load_raw_config() -> Dict[str,Any]
+  }
+
+  class "PackageNode <<pydantic>>" as PackageNode {
+    +product: str
+    +project_version: str
+    +artifact_version: str
+    +package_format: str
+    +rpm_arch_separator: str
+    +install_dir: str
+    +filename_override: Optional[str]
+    +supported_versions: Optional[List[str]]
+    +enabled: bool
+  }
+
+  class "ConfigNode <<pydantic>>" as ConfigNode {
+    +download_defaults: DownloadDefaultsNode
+    +verify_defaults: VerifyDefaultsNode
+    +packages: List[PackageNode]
+  }
+
+  class "install_state <<module>>" as StateModule {
+    +load_install_state(path=None) -> Dict[str,Any]
+    +get_installed_version(product, path=None) -> Optional[str]
+    +update_install_state(product, version, package_format, path=None) -> None
+  }
+}
+
+package "解析、下载、验签" {
+  class "resolver <<module>>" as ResolverModule {
+    +resolve_package(package, defaults) -> ResolvedPackage
+    +build_filename(package, runtime_arch) -> str
+    +build_project_base_url(base_url_prefix, project_version) -> str
+    +arch_token_for_package(package_format, runtime_arch) -> str
+  }
+
+  class "downloader <<module>>" as DownloaderModule {
+    +download_file(url, destination, timeout_seconds, retry, ssl_verify=False) -> None
+    +get_remote_file_size(url, timeout_seconds, ssl_verify=False) -> Optional[int]
+    +ensure_disk_space(destination, expected_size) -> None
+    +do_download_with_retry(...) -> None
+  }
+
+  class "verifier <<module>>" as VerifierModule {
+    +verify_p7s_detached(package_path, signature_path, root_ca, signature_format, verify_chain) -> None
+    +resolve_openssl_command() -> str
+    +inject_openssl_library_env(env) -> None
+  }
+}
+
+package "安装器" {
+  class PreCheckResult {
+    +should_install: bool
+    +reason: str
+  }
+
+  abstract class BaseInstaller {
+    -resolved: ResolvedPackage
+    -download_defaults: DownloadDefaults
+    -verify_defaults: VerifyDefaults
+    +run() -> None
+    +prepare() -> None
+    +download() -> None
+    +verify_signature() -> None
+    +pre_check(installed_version) -> PreCheckResult
+    +remove_previous_version(installed_version) -> None
+    +install() -> None
+    +post_install_check() -> None
+    +rollback() -> None
+    +cleanup_temp() -> None
+    +cleanup_after_success() -> None
+  }
+
+  class TarGzInstaller {
+    +pre_check(...) -> PreCheckResult
+    +remove_previous_version(...) -> None
+    +install() -> None
+    +post_install_check() -> None
+    +rollback() -> None
+  }
+
+  class RpmInstaller {
+    +rpm_package_name() -> str
+    +pre_check(...) -> PreCheckResult
+    +remove_previous_version(...) -> None
+    +install() -> None
+    +post_install_check() -> None
+    +rollback() -> None
+  }
+
+  class PortingAdvisorTarGzInstaller {
+    +pre_check(...) -> PreCheckResult
+    +install() -> None
+    +post_install_check() -> None
+  }
+
+  class PortingCliRpmInstaller {
+    +download() -> None
+    +verify_signature() -> None
+    +install() -> None
+    -_framework_filename() -> str
+    -_framework_package_url() -> str
+    -_framework_signature_url() -> str
+    -_framework_package_path() -> Path
+    -_framework_signature_path() -> Path
+  }
+
+  class "installers <<module>>" as InstallersModule {
+    +get_installer_class(config) -> Type[BaseInstaller]
+    +ensure_local_or_download(url, destination, timeout_seconds, retry) -> None
+    +resolve_install_dir(resolved) -> Path
+    +install_porting_advisor_runtime_layout(payload_dir, install_dir) -> None
+  }
+}
+
+package "基础设施" {
+  class "paths <<module>>" as PathsModule {
+    +app_dir() -> Path
+    +internal_dir() -> Path
+    +runtime_config_path() -> Path
+    +root_ca_path() -> Path
+    +openssl_bin_path() -> Path
+    +openssl_lib_dir() -> Path
+    +download_dir() -> Path
+    +install_state_path() -> Path
+  }
+
+  class InstallerError {
+    +exit_code: int
+  }
+  class ConfigError
+  class DownloadError
+  class SignatureVerifyError
+  class InstallError
+  class CleanupError
+}
+
+MainModule ..> ServiceModule : 调用
+MainModule ..> InstallerError : 统一异常映射
+
+ServiceModule ..> ConfigModule : 读取 RuntimeConfig
+ServiceModule ..> ResolverModule : 解析包
+ServiceModule ..> InstallersModule : 选择/实例化安装器
+
+ConfigModule ..> ConfigNode : 校验 YAML
+ConfigModule ..> RuntimeConfig : 构建运行时对象
+RuntimeConfig *-- DownloadDefaults
+RuntimeConfig *-- VerifyDefaults
+RuntimeConfig *-- "*" PackageConfig
+ResolvedPackage *-- PackageConfig
+
+ResolverModule ..> PackageConfig
+ResolverModule ..> DownloadDefaults
+ResolverModule ..> ResolvedPackage
+ResolverModule ..> PathsModule : download_dir()
+
+InstallersModule ..> BaseInstaller : 注册与工厂
+BaseInstaller o-- ResolvedPackage
+BaseInstaller o-- DownloadDefaults
+BaseInstaller o-- VerifyDefaults
+BaseInstaller ..> StateModule : 读写安装状态
+BaseInstaller ..> VerifierModule : 验签
+BaseInstaller ..> PathsModule : 根证书/目录
+BaseInstaller ..> DownloaderModule : 下载
+BaseInstaller ..> PreCheckResult
+
+TarGzInstaller --|> BaseInstaller
+RpmInstaller --|> BaseInstaller
+PortingAdvisorTarGzInstaller --|> TarGzInstaller
+PortingCliRpmInstaller --|> RpmInstaller
+
+ConfigError --|> InstallerError
+DownloadError --|> InstallerError
+SignatureVerifyError --|> InstallerError
+InstallError --|> InstallerError
+CleanupError --|> InstallerError
+
+note bottom of PackageConfig
+version = 项目版本（决定下载目录、安装状态）
+artifact_version = 产物版本（决定包文件名）
+install_dir = 必填，安装目标目录唯一来源
+end note
+
+note bottom of BaseInstaller
+模板方法顺序固定：
+prepare -> download -> verify_signature -> install -> post_install_check -> cleanup_after_success
+异常路径统一：rollback_safely + cleanup_temp_safely
+end note
+
+@enduml
+
+
+```
+
+1. 分层结构：
+   1. `main -> service -> resolver/installers -> downloader/verifier/state` 单向依赖，避免环依赖。
+   2. 上层只编排不做底层细节，下层只做单一职责能力。
+2. 数据驱动思路：
+   1. `PackageConfig` 与 `ResolvedPackage` 分离，前者描述配置语义，后者描述执行语义。
+   2. 双版本字段（`version`/`artifact_version`）避免目录版本与文件版本混淆。
+3. 设计模式：
+   1. 模板方法模式：`BaseInstaller.run()` 固化主流程，子类只实现差异点（`pre_check/install/rollback`）。
+   2. 工厂模式：`get_installer_class()` 通过注册表按 `(product, format)` 返回安装器，避免 `if-else` 扩散。
+   3. 策略组合思想：`ensure_local_or_download`、`verify_p7s_detached`、`resolve_package` 作为可复用能力，以组合方式接入安装流程。
+   4. 异常语义模式：统一 `InstallerError` 分层异常 + 退出码映射，实现稳定外部契约。
+4. 后续扩展方式：
+   1. 新增产品（不新增包格式）：
+      1. 在 YAML 增加 product 配置项。
+      2. 在 `installers.py` 新增产品安装器子类并注册到 `INSTALLER_REGISTRY`。
+   2. 新增包格式：
+      1. 在 `constants.py` 扩展格式常量。
+      2. 在 `resolver.py` 增加文件名与架构 token 规则。
+      3. 增加对应中间安装器或产品安装器实现。
+   3. 新增验签机制：
+      1. 在 `verifier.py` 增加新验证函数。
+      2. 在 `installers.py` 的 `verify_signature` 阶段按配置选择调用。
+   4. 新增 pre-check 规则：
+      1. 优先在具体产品安装器重写 `pre_check`，避免污染 `BaseInstaller` 通用模板。
+5. 设计守则：
+   1. 新功能尽量通过“新增模块/子类/注册表项”实现，避免在已有主流程中堆叠分支。
+   2. 对外行为变化必须同时更新 `errors.py` 语义和 E2E 场景矩阵。
+
+#### 2.3.2 关键类与关系说明
+
+| 类/模块 | 类型 | 关键字段/方法 | 关系与设计意图 |
+|---|---|---|---|
+| `RuntimeConfig` | 聚合数据对象 | `download_defaults`/`verify_defaults`/`packages` | 作为运行时单一配置快照，避免跨模块重复读取 YAML |
+| `PackageConfig` | 数据对象 | `product`、`version`、`artifact_version`、`install_dir` | 统一产品契约，消除散落字符串参数 |
+| `ResolvedPackage` | 数据对象 | `filename`、`package_url`、`signature_url`、`package_path` | 将“可执行下载上下文”一次性解析出来，后续模块只消费结果 |
+| `BaseInstaller` | 模板父类 | `run()`、`pre_check()`、`install()`、`rollback()` | 固定主流程顺序，所有产品共享一致的错误处理框架 |
+| `TarGzInstaller` | 抽象中间实现 | `install()`、`remove_previous_version()` | 封装 tar.gz 通用流程，减少产品子类重复 |
+| `RpmInstaller` | 抽象中间实现 | `install()`、`post_install_check()` | 封装 rpm 通用安装/校验流程 |
+| `PortingAdvisorTarGzInstaller` | 产品实现 | payload 识别、二层包提取、运行时布局发布 | 将产品特殊手工步骤隔离在子类中 |
+| `PortingCliRpmInstaller` | 产品实现 | framework 包下载/验签/安装、目录整理 | 处理双 rpm 依赖关系与发布目录整理 |
+| `ConfigNode`/`PackageNode` | Pydantic 校验模型 | 字段类型、必填、枚举、版本约束 | 在配置入口提前失败，防止运行期进入脏数据 |
+| `InstallerError` 家族 | 错误契约 | `exit_code` | 全局可观测错误语义与退出码一致性 |
+
+### 2.4 关键步骤与子流程图
+
+#### 2.4.1 关键步骤定义
+
+关键步骤选择为“版本切换 + pre_check 决策”，原因如下：
+
+1. 这是安装执行前的核心分叉点，直接决定“重装、跳过、继续安装”的路径。
+2. 该步骤同时关联状态文件、目录清理与幂等策略，是稳定性风险最高的环节之一。
+
+#### 2.4.2 子流程图
+
+1. [precheck_version_switch_activity.puml]
+```plantuml
+@startuml
+
+title 关键步骤子流程：版本切换与 pre_check 决策（BaseInstaller.run）
+
+start
+:读取 installed_version;
+:读取 target_version (config.version);
+
+if (installed_version 存在 且 != target_version?) then (yes)
+  :打印版本切换日志;
+  :remove_previous_version(installed_version);
+else (no)
+endif
+
+:pre_check(installed_version);
+if (should_install = false?) then (yes)
+  :打印 skip 原因;
+  :record_install_success();
+  stop
+else (no)
+endif
+
+:进入后续主流程
+prepare -> download -> verify_signature
+-> pre_install -> install
+-> post_install_check -> cleanup_after_success;
+:record_install_success();
+stop
+
+@enduml
+
+```
+2. [installer_template_activity.puml]
+```plantuml
+@startuml
+
+title BaseInstaller.run 模板方法活动图
+
+start
+:读取 installed_version;
+:target_version = config.version(项目版本);
+
+if (installed_version 存在 且 != target_version?) then (yes)
+  :remove_previous_version(installed_version);
+else (no)
+endif
+
+:pre_check(installed_version);
+if (should_install?) then (no)
+  :打印 skip 原因;
+  :record_install_success();
+  stop
+else (yes)
+endif
+
+partition "主流程" {
+  :prepare();
+  :download();
+  note right
+    download() 内部对每个文件执行：
+    1) 本地存在且非空 -> 直接使用
+    2) 否则下载
+    3) 下载失败 -> 抛出离线投放提示
+  end note
+  :verify_signature();
+  :pre_install();
+  :install();
+  :post_install_check();
+  :cleanup_after_success();
+  :record_install_success();
+}
+
+:打印 completed;
+stop
+
+partition "异常处理" {
+  if (捕获 InstallerError?) then (yes)
+    :打印 failed;
+    :rollback_safely();
+    :cleanup_temp_safely();
+    :向上抛原异常;
+  else (no)
+    :打印 failed;
+    :rollback_safely();
+    :cleanup_temp_safely();
+    :抛 InstallError("Unhandled installer exception");
+  endif
+}
+
+@enduml
+```
+3. [resolver_decision_activity.puml]
+```plantuml
+@startuml
+
+title resolver.resolve_package 决策图
+
+start
+:输入 PackageConfig + DownloadDefaults;
+:detect_runtime_arch();
+if (package_format in {rpm, tar.gz}?) then (yes)
+else (no)
+  :raise ConfigError("Unsupported package format");
+  stop
+endif
+
+if (filename_override 存在?) then (yes)
+  :filename = filename_override;
+else (no)
+  :arch_token = arch_token_for_package(format, runtime_arch);
+  if (format == tar.gz?) then (yes)
+    :filename = product-artifact_version-arch_token.tar.gz;
+  else (rpm)
+    :filename = product-artifact_version\nrpm_arch_separator+arch_token.rpm;
+  endif
+endif
+
+:base_url = build_project_base_url(download_defaults.base_url, version);
+:package_url = base_url + '/' + filename;
+:signature_url = package_url + signature_suffix;
+:artifact_dir = product;
+:package_path/signature_path = download_dir()/artifact_dir/...;
+:输出 ResolvedPackage;
+stop
+
+@enduml
+```
+4. [offline_local_or_download_activity.puml]
+```plantuml
+@startuml
+
+title 离线优先决策流程（ensure_local_or_download）
+
+start
+:输入 url + destination;
+
+if (destination 存在且是文件?) then (yes)
+  if (size > 0?) then (yes)
+    :打印 "Use local artifact file";
+    :直接返回;
+    stop
+  else (no)
+    :判定为空文件，视为不可用;
+  endif
+else (no)
+endif
+
+:调用 downloader.download_file(...);
+if (下载成功?) then (yes)
+  :返回;
+  stop
+else (no)
+  :包装 DownloadError;
+  :附加离线提示：
+  note right
+    Offline install hint:
+    place file at <destination>
+    and rerun.
+  end note
+  :抛出 DownloadError(20);
+  stop
+endif
+
+@enduml
+```
+5. [downloader_activity.puml]
+```plantuml
+@startuml
+
+title 下载器流程与异常分支（downloader.py）
+
+' 说明：
+' 该流程仅在“本地文件缺失或空文件”时触发。
+' 本地命中分支在 installers.ensure_local_or_download 中处理。
+
+start
+:download_file(url,destination,timeout,retry);
+:创建 destination.parent;
+:tmp = destination + .tmp;
+:HEAD 探测 remote_size(可选);
+
+if (本地已存在且可复用?) then (yes)
+  :skip download;
+  stop
+else (no)
+endif
+
+if (磁盘空间校验通过?) then (yes)
+else (no)
+  :DownloadError: Insufficient disk space;
+  stop
+endif
+
+:attempts = max(1,retry);
+
+repeat
+  :清理历史 tmp;
+  :建立 TLS 上下文;
+  if (TLS_INSECURE=1?) then (yes)
+    :禁用证书校验并告警;
+  else (no)
+    :加载内置 root_ca (若存在);
+    :加载 TLS_CA_FILE_ENV (若配置);
+  endif
+
+  :urlopen + 流式写入 tmp;
+  if (下载流异常?) then (yes)
+    :记录失败 attempt;
+    :清理 tmp;
+  else (no)
+    if (tmp 非空?) then (yes)
+      :tmp 原子替换 destination;
+      :下载成功;
+      stop
+    else (no)
+      :记录空文件失败;
+      :清理 tmp;
+    endif
+  endif
+repeat while (未超过 attempts)
+
+:DownloadError: Failed to download;
+stop
+
+@enduml
+
+```
+6. [verifier_activity.puml]
+```plantuml
+@startuml
+
+title detached p7s 验签流程（verifier.py）
+
+start
+:normalize_inform(signature_format);
+if (inform in {DER,PEM}?) then (yes)
+else (no)
+  :SignatureVerifyError: Unsupported signature format;
+  stop
+endif
+
+if (verify_chain=true?) then (yes)
+  if (root_ca exists?) then (yes)
+  else (no)
+    :SignatureVerifyError: Root CA file does not exist;
+    stop
+  endif
+else (no)
+  :标记 noverify 并输出 warning;
+endif
+
+:resolve_openssl_command();
+if (内置 openssl 存在?) then (yes)
+  :使用内置 openssl;
+else (no)
+  :SignatureVerifyError: built-in openssl missing;
+  stop
+endif
+
+if (内置 openssl lib 目录存在?) then (yes)
+  :注入 LD_LIBRARY_PATH/DYLD_LIBRARY_PATH;
+else (no)
+  :SignatureVerifyError: built-in openssl lib missing;
+  stop
+endif
+
+:组装 openssl cms verify 命令;
+:OPENSSL_CONF=/dev/null 执行命令;
+if (returncode==0?) then (yes)
+  :验签成功;
+  stop
+else (no)
+  :SignatureVerifyError: P7S verification failed;
+  stop
+endif
+
+@enduml
+
+```
+
+
+#### 2.4.3 子流程要点说明
+
+| 子流程节点 | 设计意图 | 对应实现点 |
 |---|---|---|
-| CFG-B01 | 环境变量配置路径存在 | 使用环境变量路径 |
-| CFG-B02 | 未配置环境变量且打包态配置存在 | 使用打包态路径 |
-| CFG-B03 | 打包态配置不存在 | 回退项目目录路径 |
-| CFG-B04 | 文件不存在 | `ConfigError(10)` |
-| CFG-B05 | YAML 模块缺失 | `ConfigError(10)` |
-| CFG-B06 | YAML 解析失败 | `ConfigError(10)` |
-| CFG-B07 | 根节点不是 mapping | `ConfigError(10)` |
-| CFG-B08 | `download_defaults` 结构错误 | `ConfigError(10)` |
-| CFG-B09 | `verify_defaults` 结构错误 | `ConfigError(10)` |
-| CFG-B10 | `packages` 不是 list | `ConfigError(10)` |
-| CFG-B11 | `packages[i]` 不是 mapping | `ConfigError(10)` |
-| CFG-B12 | 必填字段缺失或空 | `ConfigError(10)` |
-| CFG-B13 | `supported_versions` 非 list | `ConfigError(10)` |
-| CFG-B14 | `project_version` 不在 `supported_versions` | `ConfigError(10)` |
-| CFG-B15 | `rpm_arch_separator` 非 `-/.` | `ConfigError(10)` |
+| 读取 `installed_version` | 将历史状态与目标状态显式对比 | `BaseInstaller.recorded_installed_version()` |
+| 版本不一致先清理旧版本 | 避免旧版本残留影响新版本安装 | `remove_previous_version(installed_version)` |
+| 执行 pre_check | 在昂贵动作前做快速判定 | `pre_check()` |
+| pre_check 命中 skip | 保持幂等并快速返回 | `record_install_success()` + return |
+| pre_check 放行安装 | 进入完整主流程 | `prepare -> download -> verify -> install ...` |
 
-## 8. 解析层设计（resolver.py）
-### 8.1 设计意图
-1. 单一入口解析，输出 `ResolvedPackage`，避免分散拼接逻辑。
-2. URL 和文件名分离建模，支撑项目版本与产物版本独立演进。
-3. 优先配置化处理命名差异。
+---
 
-### 8.2 分支清单
-| 分支ID | 条件 | 结果 |
+## 三、安全设计
+
+### 3.1 安全问题与防护矩阵
+
+| 安全问题 | 风险描述 | 触发面 | 当前防护设计 | 仍需关注点 |
+|---|---|---|---|---|
+| 包篡改 | 下载文件被替换或中间人篡改 | 下载链路 | 强制 P7S detached 验签；默认 `verify_chain=true` | 证书更新流程需要运维化 |
+| 根证书缺失 | 验签链无法建立导致误用不可信包 | 部署/构建 | `root_ca_path()` 仅使用内置证书，缺失即失败 | 构建产物必须校验证书存在 |
+
+### 3.2 退出码
+
+| 退出码 | 错误类型 | 语义 |
 |---|---|---|
-| RES-B01 | `uname -m` 成功且可识别 | 归一化为 `arm64/x86_64` |
-| RES-B02 | `uname -m` 失败 | 回退 `platform.machine()` |
-| RES-B03 | 架构不支持 | `ConfigError(10)` |
-| RES-B04 | 包格式不支持 | `ConfigError(10)` |
-| RES-B05 | `filename_override` 存在 | 直接使用 override |
-| RES-B06 | tar.gz 文件名 | `product-token + artifact_version + arch_token` |
-| RES-B07 | rpm 文件名 | 使用 `rpm_arch_separator` 拼接 |
-| RES-B08 | `base_url` 已含 `project_version` | 不重复拼接 |
-| RES-B09 | `base_url` 以 `%20` 或 `/` 结尾 | 直接拼接 project_version |
-| RES-B10 | 普通路径前缀 | 用 `/` 拼接 project_version |
+| `10` | `ConfigError` | 输入配置或环境不可信，阻断执行 |
+| `20` | `DownloadError` | 远端不可达或下载不可用，未进入安装 |
+| `40` | `SignatureVerifyError` | 完整性/信任链校验失败，拒绝安装 |
+| `50` | `InstallError` | 安装执行过程失败，需排查系统状态 |
+| `60` | `CleanupError` | 主流程成功但清理失败，需人工处理残留 |
+| `1` | 其他异常 | 未归类异常兜底 |
 
-## 9. 下载层设计（downloader.py）
-### 9.1 设计意图
-1. 提前发现空间问题，避免下载到中途失败。
-2. 通过 `.tmp` + 原子替换保证目标文件一致性。
-3. HEAD 探测与本地尺寸比较减少重复下载。
+---
 
-### 9.2 分支清单
-| 分支ID | 条件 | 结果 |
+## 四、测试用例设计
+
+### 4.1 测试分层与执行入口
+
+| 层级 | 目标 | 入口 |
 |---|---|---|
-| DL-B01 | `TLS_INSECURE=1` | 使用不校验证书上下文并告警 |
-| DL-B02 | 默认 TLS | 加载系统 CA + 内置 root_ca（若存在） |
-| DL-B03 | 额外 `TLS_CA_FILE_ENV` | 加载额外 CA |
-| DL-B04 | HEAD 失败 | `remote_size=None`，继续下载 |
-| DL-B05 | 本地文件可复用 | skip 下载 |
-| DL-B06 | 远端大小未知且空间不足 | `DownloadError(20)` |
-| DL-B07 | 远端大小已知且空间不足 | `DownloadError(20)` |
-| DL-B08 | 下载后空间偏低 | warning，不中断 |
-| DL-B09 | retry 次数小于1 | 归一化为1次 |
-| DL-B10 | 单次下载异常 | 记录并重试 |
-| DL-B11 | 所有重试失败 | `DownloadError(20)` |
-| DL-B12 | 下载结果为空文件 | `DownloadError(20)` |
-| DL-B13 | 下载成功 | tmp 原子替换为目标文件 |
+| UT | 校验函数/模块逻辑与边界分支 | `pytest -q` |
+| IT/E2E | 校验构建产物在真实环境全链路行为 | `./scripts/e2e_cases.sh [--container <name>]` |
 
-## 10. 验签层设计（verifier.py）
-### 10.1 设计意图
-1. 默认要求证书链校验，提供可控降级开关。
-2. 运行时优先内置 openssl，兼容系统 openssl 回退。
+### 4.2 UT 用例设计（按文件）
 
-### 10.2 分支清单
-| 分支ID | 条件 | 结果 |
-|---|---|---|
-| VF-B01 | `signature_format` 非 DER/PEM | `SignatureVerifyError(40)` |
-| VF-B02 | `verify_chain=true` 且 root_ca 缺失 | `SignatureVerifyError(40)` |
-| VF-B03 | `verify_chain=false` | 使用 `-noverify` 并告警 |
-| VF-B04 | 内置 openssl 存在 | 使用内置 openssl |
-| VF-B05 | 内置 openssl 不存在 | 回退系统 openssl |
-| VF-B06 | openssl returncode=0 | 验签成功 |
-| VF-B07 | openssl returncode!=0 | `SignatureVerifyError(40)` |
+| 用例文件 | 覆盖模块 | 关键场景 | 通过标准 |
+|---|---|---|---|
+| `tests/test_config_runtime.py` | `config.py` | YAML 解析错误、字段缺失、版本不在支持范围、rpm 分隔符非法 | 抛出 `ConfigError(10)` 且错误信息匹配 |
+| `tests/test_resolver.py` | `resolver.py` | 双版本语义、rpm `-`/`.` 规则、架构 token、URL 拼接 | 解析结果 `filename/package_url/path` 精确匹配 |
+| `tests/test_porting_cli_urls.py` | `resolver.py` + `installers.py` | devkit framework URL 必须跟随项目版本目录 | URL 与预期完全一致 |
+| `tests/test_downloader.py` | `downloader.py` | 重试、空间不足、空文件、防重复下载、TLS 分支 | 抛错类型与日志证据符合预期 |
+| `tests/test_p7s_verifier.py` | `verifier.py` | 格式非法、根证书缺失、链校验开关、命令失败 | 返回成功或抛出 `SignatureVerifyError(40)` |
+| `tests/test_install_state.py` | `install_state.py` | 状态读取、损坏 YAML、原子写后读回 | 状态字段与写入值一致 |
+| `tests/test_installer_flow.py` | `installers.py` | pre-check skip、版本切换、安装失败回滚、清理失败保护主错误 | 调用序列与最终异常符合模板方法预期 |
+| `tests/test_installer_service.py` | `service.py` | `--name` 选择逻辑、空值校验、无匹配产品 | 抛 `ConfigError(10)` 或返回 0 |
+| `tests/test_main.py` | `main.py` | 参数透传、异常映射退出码 | 退出码稳定 |
+| `tests/test_paths.py` | `paths.py` | 打包态/开发态路径解析、配置路径优先级 | 路径选择符合设计 |
+| `tests/test_porting_advisor_layout.py` | `installers.py` | Porting Advisor 成品布局校验与提取流程 | `config/jre/jar` 布局可验证 |
+| `tests/test_registry.py` | `installers.py` | 安装器注册映射与未知映射异常 | 返回正确安装器类型或 `ConfigError` |
 
-## 11. 安装模板设计（BaseInstaller）
-### 11.1 设计意图
-1. 用模板方法锁定主流程顺序，防止产品子类绕过关键步骤。
-2. 把产品差异限制在 `pre_check/remove_previous/install/rollback`。
-3. 任何失败路径都尝试“安全回滚 + 安全清理”。
+### 4.3 IT/E2E 用例设计（场景矩阵）
 
-### 11.2 模板分支清单
-| 分支ID | 条件 | 结果 |
-|---|---|---|
-| INS-B01 | 已安装版本存在且不等于目标项目版本 | 调用 `remove_previous_version` |
-| INS-B02 | `pre_check.should_install=false` | skip + `record_install_success` |
-| INS-B03 | 主流程全部成功 | `record_install_success` + completed |
-| INS-B04 | 抛出 InstallerError | rollback_safely + cleanup_temp_safely + 原样抛出 |
-| INS-B05 | 抛出未知异常 | rollback_safely + cleanup_temp_safely + 转 `InstallError(50)` |
-| INS-B06 | cleanup_temp 失败 | `CleanupError(60)`（主流程成功时） |
-| INS-B07 | rollback/cleanup safe 失败 | 仅记录日志，不覆盖主异常 |
+执行脚本：`scripts/e2e_cases.sh`
 
-## 12. 产品安装器设计
-### 12.1 TarGzInstaller 通用分支
-| 分支ID | 条件 | 结果 |
-|---|---|---|
-| TG-B01 | 同版本且 install_dir 存在 | skip |
-| TG-B02 | 版本切换 | 删除 install_dir |
-| TG-B03 | 存在 install.sh | 执行脚本，失败则 `InstallError(50)` |
-| TG-B04 | install_dir 最终不存在 | `InstallError(50)` |
+| 场景ID | 场景说明 | 目标分支 | 预期结果 |
+|---|---|---|---|
+| S01 | Porting-Advisor 首次安装 | pre-check install | `rc=0` 且出现 `Installer run completed` |
+| S02 | Porting-Advisor 同版本重复安装 | pre-check skip | `rc=0` 且出现 `Installer pre-check hit` |
+| S03 | devkit-porting 首次安装 | rpm + framework 全链路 | `rc=0` |
+| S04 | devkit-porting 同版本重复安装 | pre-check skip | `rc=0` 且 skip 证据 |
+| S05 | 项目版本不在 `supported_versions` | config 版本约束 | `rc=10` |
+| S06 | 低版本切到目标版本 | version switch | `rc=0` 且出现切换日志 |
+| S07 | 高版本切到目标版本 | version switch | `rc=0` 且出现切换日志 |
+| S08 | Porting-Advisor 成品结构校验 | post-install layout | 存在 `config/jre/sql-analysis-*.jar` |
+| S09 | 成功后缓存目录清理 | cleanup_after_success | 下载目录不存在 |
+| S10 | 输入不支持参数 `--package-id` | CLI 参数约束 | `rc=2` |
+| S11 | install_state YAML 损坏 | 状态读取异常 | `rc=10` |
+| S12 | config YAML 损坏 | 配置解析异常 | `rc=10` |
+| S13 | 下载地址不可达 | download fail + 离线提示 | `rc=20` 且含 `Offline install hint` |
+| S14 | 错误 `signature_format` 触发验签失败 | verifier fail | `rc=40` |
+| S15 | 伪造不支持架构 | resolver arch fail | `rc=10` |
+| S16 | 同版本但安装目录缺失 | pre-check 需重装 | `rc=0` 且不能 skip |
+| S18 | devkit-porting 目录整理失败 | install fail | `rc=50` |
+| S19 | 根证书缺失 | verify_chain fail | `rc=40` |
+| S20 | 清理失败路径 | safe cleanup & wrap | `rc=50` 且主错误不被覆盖 |
+| S21 | PA 包+签名本地命中，网络不可达 | offline local hit | `rc=0` 且出现 `Use local artifact file` |
+| S22 | PA 主包命中，签名缺失可在线补齐 | mixed local/online | `rc=0` |
+| S23 | PA 主包为空且网络不可达 | offline fail hint | `rc=20` 且提示投放路径 |
+| S24 | PA 主包缺失且网络不可达 | offline fail hint | `rc=20` 且提示投放路径 |
+| S25 | DP 四文件本地命中且网络不可达 | offline full local | `rc=0` |
+| S26 | DP framework 主包缺失但网络可达 | mixed local/online | `rc=0` |
+| S27 | DP framework 主包缺失且网络不可达 | offline fail hint | `rc=20` |
+| S28 | DP framework 主包空文件且网络不可达 | offline fail hint | `rc=20` |
+| S29 | DP framework 签名缺失且网络不可达 | offline fail hint | `rc=20` |
 
-### 12.2 RpmInstaller 通用分支
-| 分支ID | 条件 | 结果 |
-|---|---|---|
-| RPM-B01 | 同版本 | skip |
-| RPM-B02 | 版本切换卸载失败 | 忽略并继续 |
-| RPM-B03 | `rpm` 命令缺失 | `InstallError(50)` |
-| RPM-B04 | `rpm -Uvh` 失败 | `InstallError(50)` |
-| RPM-B05 | `rpm -q` 失败 | `InstallError(50)` |
-
-### 12.3 Porting-Advisor 特化分支
-| 分支ID | 条件 | 结果 |
-|---|---|---|
-| PA-B01 | 同版本且 `config/jre/jar` 结构完整 | skip |
-| PA-B02 | payload 在 base_dir | 直接使用 |
-| PA-B03 | payload 在子目录 | 搜索命中后使用 |
-| PA-B04 | payload 未找到 | `InstallError(50)` |
-| PA-B05 | 缺少 `Sql-Analysis*.tar.gz` 或 `jre*.tar.gz` | `InstallError(50)` |
-| PA-B06 | 缺少 `config` 或 `jre` 或 `jar` | `InstallError(50)` |
-| PA-B07 | 安装后布局校验失败 | `InstallError(50)` |
-
-### 12.4 devkit-porting 特化分支
-| 分支ID | 条件 | 结果 |
-|---|---|---|
-| PC-B01 | 同版本且 `DevKit-Porting-CLI/devkit` 存在 | skip |
-| PC-B02 | 版本切换 | 卸载旧 rpm + 删除旧目录 |
-| PC-B03 | framework URL 拼接 | 必须与主包使用同一项目版本目录 |
-| PC-B04 | 主包或 framework 下载失败 | `DownloadError(20)` |
-| PC-B05 | 主包或 framework 验签失败 | `SignatureVerifyError(40)` |
-| PC-B06 | 双 rpm 任意安装失败 | `InstallError(50)` |
-| PC-B07 | porting_root 创建失败 | `InstallError(50)` |
-| PC-B08 | 旧 target 清理失败 | `InstallError(50)` |
-| PC-B09 | relocate 结果 `_internal/devkit` 缺失 | `InstallError(50)` |
-| PC-B10 | rename 失败 | `InstallError(50)` |
-
-## 13. 状态持久化设计（install_state.py）
-### 13.1 设计意图
-1. 把“是否已安装、安装到哪个项目版本”从安装目录探测中解耦。
-2. 状态写入采用原子替换，避免中断损坏。
-
-### 13.2 分支清单
-| 分支ID | 条件 | 结果 |
-|---|---|---|
-| ST-B01 | 状态文件不存在 | 返回空结构 |
-| ST-B02 | 状态 YAML 损坏 | `ConfigError(10)` |
-| ST-B03 | 状态根结构非预期 | 回退空结构 |
-| ST-B04 | 产品节点不存在 | `installed_version=None` |
-| ST-B05 | 更新状态 | 原子写入 `.tmp -> replace` |
-
-## 14. 退出码设计意图
-1. `10`：配置/输入错误，通常用户可修复。
-2. `20`：下载链路错误，通常网络/源端问题。
-3. `40`：验签错误，属于安全风险。
-4. `50`：安装执行错误，通常系统状态或包内容问题。
-5. `60`：清理失败（主流程成功后）。
-6. `1`：未知异常兜底，代表设计外分支。
-
-## 15. 分支覆盖矩阵（设计到测试）
-### 15.1 覆盖映射说明
-1. UT 文件与 E2E 场景定义详见 [TESTING_GUIDE.md](/Users/fxl/pycharm_projects/package/docs/TESTING_GUIDE.md)。
-2. 本表用于判断“每个设计分支是否已有验证入口”。
-
-| 设计分支组 | 主要分支ID | 覆盖方式 |
-|---|---|---|
-| 编译期工具与证书前置 | C-B01..C-B05 | Build 脚本执行验证（E2E 前置） |
-| 配置解析与约束 | CFG-B01..CFG-B15 | `test_config_runtime.py` + `S05/S12` |
-| 解析规则与双版本 | RES-B01..RES-B10 | `test_resolver.py` + `test_porting_cli_urls.py` + `S03` |
-| 下载重试与空间/TLS分支 | DL-B01..DL-B13 | `test_downloader.py` + `S13` |
-| 验签链路与格式分支 | VF-B01..VF-B07 | `test_p7s_verifier.py` + `S14/S19` |
-| 模板主流程与异常封装 | INS-B01..INS-B07 | `test_installer_flow.py` + `S20` |
-| tar/rpm 通用分支 | TG-B01..TG-B04, RPM-B01..RPM-B05 | `test_installer_flow.py` + `S01..S04/S16` |
-| Porting-Advisor 特化分支 | PA-B01..PA-B07 | `test_porting_advisor_layout.py` + `S01/S02/S08` |
-| devkit-porting 特化分支 | PC-B01..PC-B10 | `test_porting_cli_urls.py` + `S03/S04/S18` |
-| 状态持久化 | ST-B01..ST-B05 | `test_install_state.py` + `S11` |
-| 入口参数冲突与选择 | R-B01..R-B05 | `test_installer_service.py` + `S10` |
-
-## 16. 已知边界与后续建议
-1. `S17`（破坏 Porting-Advisor 压缩包完整性）当前策略上由验签保障，不纳入默认 E2E。
-2. 若将来支持更多 rpm 命名风格，建议新增 `filename_pattern` 模板字段，替代更多特化代码。
-3. 编译期建议补充 Linux 动态库复制策略与产物自检脚本，进一步降低环境耦合。
-4. 当前回滚策略以“幂等清理”为主，若未来需要可审计恢复点，可引入事务日志。
-
-## 17. 审计使用方法（给评审者）
-1. 先看图：组件图 -> 编译期图 -> 运行期时序图。
-2. 再看分支：按章节 5~13 的分支表逐条核对。
-3. 最后看覆盖：章节 15 确认每组分支是否有 UT/E2E 入口。
-4. 如发现某分支无覆盖，可在 `TESTING_GUIDE` 中追加场景 ID 并回填矩阵。

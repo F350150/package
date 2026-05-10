@@ -24,7 +24,15 @@ endif
 if (内置 openssl 存在?) then (yes)
   :使用内置 openssl;
 else (no)
-  :回退系统 openssl;
+  :SignatureVerifyError: built-in openssl missing;
+  stop
+endif
+
+if (内置 openssl lib 目录存在?) then (yes)
+  :注入 LD_LIBRARY_PATH/DYLD_LIBRARY_PATH;
+else (no)
+  :SignatureVerifyError: built-in openssl lib missing;
+  stop
 endif
 
 :组装 openssl cms verify 命令;

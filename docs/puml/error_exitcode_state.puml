@@ -4,6 +4,10 @@ title 错误到退出码映射流程图
 
 start
 :执行 main()/installer.run;
+note right
+  例：install_state 写入阶段锁获取超时（TimeoutError）
+  在 BaseInstaller.run 中被包装为 InstallError
+end note
 
 if (无异常?) then (yes)
   :返回 0;

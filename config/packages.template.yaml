@@ -3,6 +3,10 @@ download_defaults:
   signature_suffix: ".p7s"
   timeout_seconds: 300
   retry: 3
+  # 缓存策略：
+  # cleanup: 安装成功后清理下载缓存（默认）
+  # keep_latest: 保留本次安装对应缓存，便于后续复用
+  cache_policy: "cleanup"
 
 verify_defaults:
   signature_type: "p7s"

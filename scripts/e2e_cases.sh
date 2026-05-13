@@ -5,7 +5,7 @@ set -euo pipefail
 # e2e_cases.sh
 #
 # 目标：执行 package-manager 端到端场景回归（按场景编号）
-# 默认覆盖：S01-S16, S18-S20 + 离线新特性分支场景 S21-S29（显式跳过 S17）
+# 默认覆盖：S01-S16, S18-S20 + 离线新特性分支场景 S21-S34（显式跳过 S17）
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,6 +16,8 @@ VERSION="26.0.RC1"
 CONTAINER_NAME=""
 CONTAINER_BOOTSTRAP_DEPS="true"
 SKIP_BUILD="false"
+FROM_CASE=""
+FROM_CASE_NUM=0
 FORWARD_ARGS=()
 
 usage() {
@@ -26,12 +28,14 @@ Usage:
 Options:
   --version <ver>               构建版本号（默认: 26.0.RC1）
   --skip-build                  跳过 build（要求 dist 已存在）
+  --from-case <Sxx>             从指定用例开始执行（如: S30）
   --container <name>            在指定容器里执行场景
   --container-no-bootstrap      容器模式下不自动安装 pyinstaller/pyyaml
   -h, --help                    查看帮助
 
 Examples:
   ./scripts/e2e_cases.sh
+  ./scripts/e2e_cases.sh --from-case S30
   ./scripts/e2e_cases.sh --container openeuler-arm
 USAGE
 }
@@ -89,6 +93,11 @@ while [[ $# -gt 0 ]]; do
       FORWARD_ARGS+=("$1")
       shift
       ;;
+    --from-case)
+      FROM_CASE="${2:-}"
+      FORWARD_ARGS+=("$1" "$2")
+      shift 2
+      ;;
     --container)
       CONTAINER_NAME="${2:-}"
       shift 2
@@ -108,6 +117,15 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "${FROM_CASE}" ]]; then
+  if [[ "${FROM_CASE}" =~ ^S([0-9]+)$ ]]; then
+    FROM_CASE_NUM="$((10#${BASH_REMATCH[1]}))"
+  else
+    echo "Invalid --from-case value: ${FROM_CASE} (expected like S30)"
+    exit 1
+  fi
+fi
 
 if [[ -n "${CONTAINER_NAME}" && "${INTERNAL_CONTAINER_RUN:-0}" != "1" ]]; then
   run_inside_container "${CONTAINER_NAME}"
@@ -165,6 +183,8 @@ STATE_DEVKIT="${LOG_DIR}/state_devkit.yaml"
 TOTAL=0
 PASSED=0
 FAILED=0
+SKIPPED=0
+declare -A SKIPPED_CASES
 
 case_desc() {
   local sid="$1"
@@ -197,6 +217,11 @@ case_desc() {
     S27) echo "DP framework 主包缺失 + 网络不可达 -> 离线提示" ;;
     S28) echo "DP framework 主包空文件 + 网络不可达 -> 离线提示" ;;
     S29) echo "DP framework 签名缺失 + 网络不可达 -> 离线提示" ;;
+    S30) echo "并发状态写入锁：多进程并发更新 install_state 不丢记录" ;;
+    S31) echo "断点续传：预置 .tmp 后走 HTTP Range 续传并安装成功" ;;
+    S32) echo "缓存策略 keep_latest：保留缓存并在离线重装时复用本地包" ;;
+    S33) echo "陈旧 install_state 锁自动清理：预置 stale .lock 后安装成功并更新状态" ;;
+    S34) echo "活锁保护：持锁进程存活时竞争方超时，且锁不被误删" ;;
     *) echo "未命名场景" ;;
   esac
 }
@@ -204,8 +229,12 @@ case_desc() {
 case_pass_rule() {
   local sid="$1"
   case "${sid}" in
-    S01|S03|S06|S07|S16|S21|S22|S25|S26) echo "返回码=0，且日志出现 'Installer run completed'" ;;
+    S01|S03|S06|S07|S16|S21|S22|S25|S26|S31) echo "返回码=0，且日志出现 'Installer run completed'" ;;
     S02|S04) echo "返回码=0，且日志出现 'Installer pre-check hit, skip installation'" ;;
+    S30) echo "返回码=0，且并发写入后的 state 可解析且记录条目完整" ;;
+    S32) echo "返回码=0，且日志出现 'Use local artifact file'（离线重装复用缓存）" ;;
+    S33) echo "返回码=0，且陈旧锁已清理、状态文件写入成功" ;;
+    S34) echo "返回码=0，且竞争方报 TimeoutError、持锁期间锁文件存在、释放后锁文件清理" ;;
     S05) echo "返回码=10，且日志出现 'not in supported_versions'" ;;
     S08) echo "目标目录存在 config/jre/sql-analysis-*.jar" ;;
     S09) echo "下载缓存目录不存在（已清理）" ;;
@@ -213,7 +242,8 @@ case_pass_rule() {
     S11) echo "返回码=10，且日志出现 install_state YAML 解析失败" ;;
     S12) echo "返回码=10，且日志出现 config YAML 解析失败" ;;
     S13|S23|S24|S27|S28|S29) echo "返回码=20，且日志包含 'Offline install hint' 与目标路径" ;;
-    S14|S19) echo "返回码=40，且日志出现验签/证书错误关键字" ;;
+    S14) echo "返回码=40，且日志出现验签错误关键字" ;;
+    S19) echo "返回码=10，且日志出现根证书缺失错误关键字" ;;
     S15) echo "返回码=10，且日志出现 Unsupported runtime architecture" ;;
     S18|S20) echo "返回码=50，且日志出现安装/清理失败关键字" ;;
     *) echo "返回码与关键证据同时满足" ;;
@@ -258,6 +288,38 @@ print_case_key_output() {
   echo "------------------------------------------------------------"
 }
 
+case_number() {
+  local sid="$1"
+  if [[ "${sid}" =~ ^S([0-9]+)$ ]]; then
+    echo "$((10#${BASH_REMATCH[1]}))"
+    return 0
+  fi
+  echo "0"
+}
+
+is_case_skipped() {
+  local sid="$1"
+  [[ "${SKIPPED_CASES[$sid]:-0}" == "1" ]]
+}
+
+should_skip_by_from_case() {
+  local sid="$1"
+  if (( FROM_CASE_NUM <= 0 )); then
+    return 1
+  fi
+  local sid_num
+  sid_num="$(case_number "${sid}")"
+  (( sid_num < FROM_CASE_NUM ))
+}
+
+mark_skip_case() {
+  local sid="$1"
+  SKIPPED=$((SKIPPED + 1))
+  SKIPPED_CASES["${sid}"]=1
+  print_case_separator "${sid}" "SKIP"
+  echo "[skip] ${sid} 小于起始用例 ${FROM_CASE}，已跳过"
+}
+
 run_case() {
   local sid="$1"
   local expected_rc="$2"
@@ -265,6 +327,11 @@ run_case() {
   local log_file="${LOG_DIR}/${sid}.log"
   local rc_file="${LOG_DIR}/${sid}.rc"
   local rc
+
+  if should_skip_by_from_case "${sid}"; then
+    mark_skip_case "${sid}"
+    return 0
+  fi
 
   TOTAL=$((TOTAL + 1))
   print_case_separator "${sid}" "RUN"
@@ -295,6 +362,10 @@ run_case() {
 assert_log_contains() {
   local sid="$1"
   local pattern="$2"
+  if is_case_skipped "${sid}"; then
+    echo "[skip-assert] ${sid}: skipped case, ignore log contains assert"
+    return 0
+  fi
   local log_file="${LOG_DIR}/${sid}.log"
   if grep -q -- "${pattern}" "${log_file}"; then
     local evidence
@@ -309,6 +380,10 @@ assert_log_contains() {
 assert_log_not_contains() {
   local sid="$1"
   local pattern="$2"
+  if is_case_skipped "${sid}"; then
+    echo "[skip-assert] ${sid}: skipped case, ignore log not-contains assert"
+    return 0
+  fi
   local log_file="${LOG_DIR}/${sid}.log"
   if grep -q -- "${pattern}" "${log_file}"; then
     echo "[assert-fail] ${sid}: unexpected pattern '${pattern}'"
@@ -321,6 +396,10 @@ assert_log_not_contains() {
 assert_path_exists() {
   local sid="$1"
   local p="$2"
+  if is_case_skipped "${sid}"; then
+    echo "[skip-assert] ${sid}: skipped case, ignore path exists assert"
+    return 0
+  fi
   if [[ -e "${p}" ]]; then
     echo "[evidence][${sid}] 路径存在: ${p}"
     return 0
@@ -332,6 +411,10 @@ assert_path_exists() {
 assert_path_not_exists() {
   local sid="$1"
   local p="$2"
+  if is_case_skipped "${sid}"; then
+    echo "[skip-assert] ${sid}: skipped case, ignore path not-exists assert"
+    return 0
+  fi
   if [[ ! -e "${p}" ]]; then
     echo "[evidence][${sid}] 路径不存在（符合预期）: ${p}"
     return 0
@@ -373,6 +456,47 @@ out = Path(sys.argv[2])
 raw = yaml.safe_load(base.read_text(encoding="utf-8"))
 raw["download_defaults"]["base_url"] = "https://127.0.0.1:9/not-exist"
 out.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8")
+PY
+}
+
+make_keep_latest_cfg() {
+  local out="$1"
+  python3 - "$BASE_CFG" "$out" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+base = Path(sys.argv[1])
+out = Path(sys.argv[2])
+raw = yaml.safe_load(base.read_text(encoding="utf-8"))
+raw.setdefault("download_defaults", {})["cache_policy"] = "keep_latest"
+out.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8")
+PY
+}
+
+make_keep_latest_bad_download_cfg() {
+  local out="$1"
+  python3 - "$BASE_CFG" "$out" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+base = Path(sys.argv[1])
+out = Path(sys.argv[2])
+raw = yaml.safe_load(base.read_text(encoding="utf-8"))
+raw.setdefault("download_defaults", {})["cache_policy"] = "keep_latest"
+raw["download_defaults"]["base_url"] = "https://127.0.0.1:9/not-exist"
+out.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8")
+PY
+}
+
+find_free_port() {
+  python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
 PY
 }
 
@@ -522,6 +646,353 @@ cleanup_runtime() {
   rm -rf "${PORTING_DIR}" "${PKG_ROOT}"
 }
 
+case_s30_state_lock_concurrency() {
+  local state_path="${LOG_DIR}/state_s30_lock.yaml"
+  PYTHONPATH="${ROOT_DIR}/src" python3 - "${state_path}" <<'PY'
+import multiprocessing as mp
+import sys
+from pathlib import Path
+
+from package_manager.install_state import load_install_state, update_install_state
+
+state_path = Path(sys.argv[1])
+
+def worker(i: int):
+    product = f"lock-demo-{i}"
+    update_install_state(product=product, version="26.0.RC1", package_format="tar.gz", path=state_path)
+
+if state_path.exists():
+    state_path.unlink()
+
+procs = [mp.Process(target=worker, args=(i,)) for i in range(16)]
+for p in procs:
+    p.start()
+for p in procs:
+    p.join(timeout=30)
+    if p.exitcode != 0:
+        raise SystemExit(f"worker failed: pid={p.pid} exit={p.exitcode}")
+
+state = load_install_state(state_path)
+products = state.get("products", {})
+missing = [f"lock-demo-{i}" for i in range(16) if f"lock-demo-{i}" not in products]
+if missing:
+    raise SystemExit(f"missing products after concurrent updates: {missing}")
+print(f"state products count={len(products)}")
+print("state lock concurrency check passed")
+PY
+}
+
+case_s31_resume_download() {
+  local resume_cfg="${LOG_DIR}/resume_cfg.yaml"
+  local repo_root="${LOG_DIR}/resume_repo"
+  local project_dir="${repo_root}/repo/26.0.RC1"
+  local http_log="${LOG_DIR}/s31_http.log"
+  local port
+  local server_pid=""
+  local rc=0
+
+  cleanup_runtime
+  rm -rf "${repo_root}"
+  mkdir -p "${project_dir}"
+  cp -f "${SEED_DIR}/$(basename "${PA_PACKAGE_PATH}")" "${project_dir}/$(basename "${PA_PACKAGE_PATH}")"
+  cp -f "${SEED_DIR}/$(basename "${PA_SIGNATURE_PATH}")" "${project_dir}/$(basename "${PA_SIGNATURE_PATH}")"
+
+  python3 - "${BASE_CFG}" "${resume_cfg}" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+base = Path(sys.argv[1])
+out = Path(sys.argv[2])
+raw = yaml.safe_load(base.read_text(encoding="utf-8"))
+raw["download_defaults"]["base_url"] = "__BASE_URL__"
+out.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8")
+PY
+
+  mkdir -p "$(dirname "${PA_PACKAGE_PATH}")"
+  rm -f "${PA_PACKAGE_PATH}" "${PA_SIGNATURE_PATH}"
+  python3 - "${SEED_DIR}/$(basename "${PA_PACKAGE_PATH}")" "${PA_PACKAGE_PATH}.tmp" <<'PY'
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+chunk = 8 * 1024 * 1024
+data = src.read_bytes()[:chunk]
+dst.write_bytes(data)
+print(f"seed tmp bytes={len(data)}")
+PY
+
+  port="$(find_free_port)"
+  python3 -u - "${repo_root}" "${port}" >"${http_log}" 2>&1 <<'PY' &
+import os
+import re
+import sys
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+root = Path(sys.argv[1]).resolve()
+port = int(sys.argv[2])
+
+
+class RangeHandler(SimpleHTTPRequestHandler):
+    def translate_path(self, path: str) -> str:
+        rel = os.path.normpath(unquote(urlparse(path).path)).lstrip("/")
+        full = (root / rel).resolve()
+        if root not in full.parents and full != root:
+            return str(root / "__forbidden__")
+        return str(full)
+
+    def do_HEAD(self):  # noqa: N802
+        self._send(send_body=False)
+
+    def do_GET(self):  # noqa: N802
+        self._send(send_body=True)
+
+    def _send(self, send_body: bool) -> None:
+        file_path = Path(self.translate_path(self.path))
+        if not file_path.exists() or not file_path.is_file():
+            self.send_error(404)
+            return
+
+        size = file_path.stat().st_size
+        start = 0
+        end = size - 1
+        status = 200
+        header = self.headers.get("Range", "")
+        if header.startswith("bytes="):
+            match = re.match(r"bytes=(\d+)-(\d*)", header)
+            if match:
+                start = int(match.group(1))
+                if match.group(2):
+                    end = int(match.group(2))
+                if start >= size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.end_headers()
+                    return
+                end = min(end, size - 1)
+                status = 206
+
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+
+        if not send_body:
+            return
+        with file_path.open("rb") as fp:
+            fp.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = fp.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
+
+ThreadingHTTPServer(("127.0.0.1", port), RangeHandler).serve_forever()
+PY
+  server_pid="$!"
+  sleep 1
+
+  sed -i.bak "s|__BASE_URL__|http://127.0.0.1:${port}/repo/|g" "${resume_cfg}"
+  rm -f "${resume_cfg}.bak"
+
+  set +e
+  env PACKAGE_MANAGER_CONFIG_FILE="${resume_cfg}" "${BIN_PATH}" --name DevKit-Porting-Advisor
+  rc=$?
+  set -e
+
+  if [[ -n "${server_pid}" ]]; then
+    kill "${server_pid}" >/dev/null 2>&1 || true
+    wait "${server_pid}" 2>/dev/null || true
+  fi
+
+  if [[ "${rc}" -ne 0 ]]; then
+    return "${rc}"
+  fi
+  if grep -q ' 206 ' "${http_log}"; then
+    echo "resume_from=tmp_seed range_status=206"
+  else
+    echo "resume_from=tmp_seed range_status=not_206"
+    echo "http_log_tail:"
+    tail -n 20 "${http_log}" || true
+    return 1
+  fi
+  return "${rc}"
+}
+
+case_s32_keep_latest_cache() {
+  local cfg_keep="${LOG_DIR}/cfg_keep_latest.yaml"
+  local cfg_keep_bad_dl="${LOG_DIR}/cfg_keep_latest_bad_download.yaml"
+  local state_file="${LOG_DIR}/state_s32_keep_latest.yaml"
+  local rc=0
+
+  make_keep_latest_cfg "${cfg_keep}"
+  make_keep_latest_bad_download_cfg "${cfg_keep_bad_dl}"
+
+  cleanup_runtime
+  rm -f "${state_file}"
+  env PACKAGE_MANAGER_CONFIG_FILE="${cfg_keep}" PACKAGE_MANAGER_INSTALL_STATE_FILE="${state_file}" "${BIN_PATH}" --name DevKit-Porting-Advisor
+
+  if [[ ! -f "${PA_PACKAGE_PATH}" || ! -f "${PA_SIGNATURE_PATH}" ]]; then
+    echo "keep_latest expected cache files missing"
+    return 1
+  fi
+
+  rm -rf "${PORTING_DIR}"
+  set +e
+  env PACKAGE_MANAGER_CONFIG_FILE="${cfg_keep_bad_dl}" PACKAGE_MANAGER_INSTALL_STATE_FILE="${state_file}" "${BIN_PATH}" --name DevKit-Porting-Advisor
+  rc=$?
+  set -e
+  return "${rc}"
+}
+
+case_s33_stale_lock_cleanup() {
+  local state_file="${LOG_DIR}/state_s33_stale_lock.yaml"
+  local lock_file="${state_file}.lock"
+  local rc=0
+
+  cleanup_runtime
+  rm -f "${state_file}" "${lock_file}"
+  copy_seed_file "${SEED_DIR}/$(basename "${PA_PACKAGE_PATH}")" "${PA_PACKAGE_PATH}"
+  copy_seed_file "${SEED_DIR}/$(basename "${PA_SIGNATURE_PATH}")" "${PA_SIGNATURE_PATH}"
+
+  python3 - "${lock_file}" <<'PY'
+import json
+import os
+import socket
+import time
+from pathlib import Path
+
+path = Path(os.sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+stale_meta = {
+    "pid": 99999999,
+    "host": socket.gethostname(),
+    "created_at": time.time() - 3600,
+    "start_token": "",
+    "token": "stale-seeded",
+}
+path.write_text(json.dumps(stale_meta, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+print(f"stale_lock_seeded={path}")
+PY
+
+  set +e
+  env PACKAGE_MANAGER_CONFIG_FILE="${BAD_DL_CFG}" PACKAGE_MANAGER_INSTALL_STATE_FILE="${state_file}" "${BIN_PATH}" --name DevKit-Porting-Advisor
+  rc=$?
+  set -e
+  if [[ "${rc}" -ne 0 ]]; then
+    return "${rc}"
+  fi
+
+  python3 - "${state_file}" "${lock_file}" <<'PY'
+import os
+from pathlib import Path
+import yaml
+
+state_file = Path(os.sys.argv[1])
+lock_file = Path(os.sys.argv[2])
+
+if lock_file.exists():
+    raise SystemExit(f"stale lock still exists: {lock_file}")
+
+raw = yaml.safe_load(state_file.read_text(encoding="utf-8")) or {}
+products = raw.get("products", {})
+node = products.get("DevKit-Porting-Advisor")
+if not isinstance(node, dict):
+    raise SystemExit("missing product state for DevKit-Porting-Advisor")
+if str(node.get("installed_version")) != "26.0.RC1":
+    raise SystemExit(f"unexpected installed_version: {node.get('installed_version')}")
+print("stale lock cleanup check passed")
+PY
+}
+
+case_s34_active_lock_not_reclaimed() {
+  local lock_file="${LOG_DIR}/state_s34_active.yaml.lock"
+  PYTHONPATH="${ROOT_DIR}/src" python3 - "${lock_file}" <<'PY'
+import multiprocessing as mp
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+
+from package_manager.file_lock import FileLock
+
+lock_path = Path(sys.argv[1])
+lock_path.parent.mkdir(parents=True, exist_ok=True)
+state_dir = lock_path.parent
+signal_file = state_dir / "s34_holder_ready.signal"
+
+if signal_file.exists():
+    signal_file.unlink()
+if lock_path.exists():
+    lock_path.unlink()
+
+def holder():
+    with FileLock(lock_path, timeout=1.0, poll_interval=0.01, stale_lock_ttl_seconds=1):
+        signal_file.write_text("ready", encoding="utf-8")
+        time.sleep(3)
+
+p = mp.Process(target=holder)
+p.start()
+
+deadline = time.time() + 5
+while time.time() < deadline:
+    if signal_file.exists() and lock_path.exists():
+        break
+    time.sleep(0.05)
+else:
+    p.terminate()
+    p.join(timeout=1)
+    raise SystemExit("holder did not acquire lock in time")
+
+if not lock_path.exists():
+    p.terminate()
+    p.join(timeout=1)
+    raise SystemExit("lock file missing while holder alive")
+
+timed_out = False
+try:
+    with FileLock(lock_path, timeout=0.2, poll_interval=0.02, stale_lock_ttl_seconds=1):
+        raise SystemExit("contender unexpectedly acquired live lock")
+except TimeoutError as exc:
+    timed_out = True
+    msg = str(exc)
+    if "holder=" not in msg or socket.gethostname() not in msg:
+        p.terminate()
+        p.join(timeout=1)
+        raise SystemExit(f"timeout message missing holder metadata: {msg}")
+
+if not timed_out:
+    p.terminate()
+    p.join(timeout=1)
+    raise SystemExit("expected timeout did not happen")
+
+if not lock_path.exists():
+    p.terminate()
+    p.join(timeout=1)
+    raise SystemExit("live lock was unexpectedly removed by contender")
+
+p.join(timeout=10)
+if p.exitcode != 0:
+    raise SystemExit(f"holder process failed: exit={p.exitcode}")
+
+if lock_path.exists():
+    raise SystemExit("lock file still exists after holder release")
+
+print("active lock timeout check passed")
+PY
+}
+
 cleanup_runtime
 
 # 离线场景预备：解析真实 URL 与目标路径，并一次性下载种子文件
@@ -571,18 +1042,26 @@ run_case "S07" 0 env PACKAGE_MANAGER_INSTALL_STATE_FILE="${LOG_DIR}/state_s07.ya
 assert_log_contains "S07" "Detected version switch for DevKit-Porting-Advisor: 99.0.RC1 -> 26.0.RC1"
 
 # S08: Porting-Advisor 安装结果必须包含 config/jre/sql-analysis jar
-assert_path_exists "S08" "${PORTING_DIR}/config"
-assert_path_exists "S08" "${PORTING_DIR}/jre"
-if ls "${PORTING_DIR}"/sql-analysis-*.jar >/dev/null 2>&1; then
-  :
+if should_skip_by_from_case "S08"; then
+  mark_skip_case "S08"
 else
-  echo "[assert-fail] S08: missing sql-analysis-*.jar under ${PORTING_DIR}"
-  exit 1
+  assert_path_exists "S08" "${PORTING_DIR}/config"
+  assert_path_exists "S08" "${PORTING_DIR}/jre"
+  if ls "${PORTING_DIR}"/sql-analysis-*.jar >/dev/null 2>&1; then
+    :
+  else
+    echo "[assert-fail] S08: missing sql-analysis-*.jar under ${PORTING_DIR}"
+    exit 1
+  fi
 fi
 
 # S09: 成功后下载临时目录应清空
-assert_path_not_exists "S09" "${PORTING_PKG_DIR}"
-assert_path_not_exists "S09" "${DEVKIT_PKG_DIR}"
+if should_skip_by_from_case "S09"; then
+  mark_skip_case "S09"
+else
+  assert_path_not_exists "S09" "${PORTING_PKG_DIR}"
+  assert_path_not_exists "S09" "${DEVKIT_PKG_DIR}"
+fi
 
 # S10: 传入不支持的 --package-id 参数
 run_case "S10" 2 "${BIN_PATH}" --name DevKit-Porting-Advisor --package-id "${PORTING_PRODUCT}"
@@ -646,8 +1125,8 @@ rm -f "${DIST_DIR}/_internal/porting_cli_file"
 if [[ -f "${OPENSSL_PEM}" ]]; then
   mv "${OPENSSL_PEM}" "${OPENSSL_PEM}.bak"
 fi
-run_case "S19" 40 "${BIN_PATH}" --name DevKit-Porting-Advisor
-assert_log_contains "S19" "Root CA file does not exist"
+run_case "S19" 10 "${BIN_PATH}" --name DevKit-Porting-Advisor
+assert_log_contains "S19" "CA file does not exist"
 if [[ -f "${OPENSSL_PEM}.bak" ]]; then
   mv "${OPENSSL_PEM}.bak" "${OPENSSL_PEM}"
 fi
@@ -739,6 +1218,31 @@ run_case "S29" 20 env PACKAGE_MANAGER_CONFIG_FILE="${BAD_DL_CFG}" "${BIN_PATH}" 
 assert_log_contains "S29" "Offline install hint"
 assert_log_contains "S29" "${DP_FRAMEWORK_SIGNATURE_PATH}"
 
+# S30: 并发状态写入锁（多进程并发更新 install_state）
+run_case "S30" 0 case_s30_state_lock_concurrency
+assert_log_contains "S30" "state lock concurrency check passed"
+assert_log_contains "S30" "state products count=16"
+
+# S31: 断点续传（预置 .tmp 后走 Range）
+run_case "S31" 0 case_s31_resume_download
+assert_log_contains "S31" "resume_from="
+assert_log_contains "S31" "Installer run completed"
+
+# S32: keep_latest 缓存策略（保留缓存并离线复用）
+run_case "S32" 0 case_s32_keep_latest_cache
+assert_log_contains "S32" "Use local artifact file: ${PA_PACKAGE_PATH}"
+assert_log_contains "S32" "Use local artifact file: ${PA_SIGNATURE_PATH}"
+
+# S33: 预置陈旧 install_state 锁，验证可自动清理并成功写入状态
+run_case "S33" 0 case_s33_stale_lock_cleanup
+assert_log_contains "S33" "stale_lock_seeded="
+assert_log_contains "S33" "Installer run completed"
+assert_log_contains "S33" "stale lock cleanup check passed"
+
+# S34: 活锁保护，竞争方应超时且不得误删持锁中的锁文件
+run_case "S34" 0 case_s34_active_lock_not_reclaimed
+assert_log_contains "S34" "active lock timeout check passed"
+
 # 汇总
 SUMMARY_FILE="${LOG_DIR}/summary.txt"
 {
@@ -746,6 +1250,10 @@ SUMMARY_FILE="${LOG_DIR}/summary.txt"
   echo "total=${TOTAL}"
   echo "passed=${PASSED}"
   echo "failed=${FAILED}"
+  echo "skipped=${SKIPPED}"
+  if [[ -n "${FROM_CASE}" ]]; then
+    echo "from_case=${FROM_CASE}"
+  fi
   echo "log_dir=${LOG_DIR}"
   for rc_path in "${LOG_DIR}"/*.rc; do
     sid="$(basename "${rc_path}" .rc)"

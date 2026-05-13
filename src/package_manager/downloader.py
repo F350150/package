@@ -12,6 +12,7 @@ import os
 import shutil
 import ssl
 import urllib.request
+from urllib.error import HTTPError
 from pathlib import Path
 import time
 from typing import Optional
@@ -63,7 +64,7 @@ def download_file(url: str, destination: Path, timeout_seconds: int, retry: int,
     if can_skip_download(destination, remote_size):
         return
     ensure_disk_space(destination, remote_size)
-    do_download_with_retry(url, destination, tmp_path, timeout_seconds, retry, ssl_verify)
+    do_download_with_retry(url, destination, tmp_path, timeout_seconds, retry, ssl_verify, remote_size)
 
 
 def temp_path(path: Path) -> Path:
@@ -171,6 +172,7 @@ def do_download_with_retry(
     timeout_seconds: int,
     retry: int,
     ssl_verify: bool = False,
+    remote_size: Optional[int] = None,
 ) -> None:
     """执行带重试的下载流程。"""
 
@@ -178,12 +180,21 @@ def do_download_with_retry(
     last_exc = None
     for attempt in range(1, attempts + 1):
         try:
-            download_once(url, destination, tmp_path, timeout_seconds, attempt, attempts, ssl_verify)
+            download_once(
+                url,
+                destination,
+                tmp_path,
+                timeout_seconds,
+                attempt,
+                attempts,
+                ssl_verify,
+                remote_size=remote_size,
+            )
             return
         except Exception as exc:
             last_exc = exc
-            cleanup_tmp(tmp_path)
             print(f"Download failed for {url} (attempt {attempt}/{attempts}): {exc}")
+    cleanup_tmp(tmp_path)
     raise DownloadError(f"Failed to download {url}: {last_exc}") from last_exc
 
 
@@ -195,17 +206,83 @@ def download_once(
     attempt: int,
     attempts: int,
     ssl_verify: bool = False,
+    remote_size: Optional[int] = None,
 ) -> None:
     """执行一次下载尝试。"""
 
-    cleanup_tmp(tmp_path)
-    print(f"Downloading {url} -> {destination} (attempt {attempt}/{attempts})")
-    with open_url(url, timeout_seconds, ssl_verify) as response:
-        with tmp_path.open("wb") as dst:
-            stream_copy(response, dst, remote_size=read_content_length(response))
+    resume_from = validate_resume_tmp(tmp_path, remote_size)
+    if remote_size is not None and resume_from == remote_size:
+        tmp_path.replace(destination)
+        print(f"Resume hit complete tmp file, reuse it directly: {destination}")
+        return
+
+    response, append_mode, effective_resume = open_download_stream(url, timeout_seconds, ssl_verify, resume_from, tmp_path)
+    print_download_line(url, destination, attempt, attempts, effective_resume)
+    with response:
+        with tmp_path.open("ab" if append_mode else "wb") as dst:
+            stream_copy(response, dst, remote_size=effective_total_size(read_content_length(response), effective_resume))
     ensure_non_empty(tmp_path, url)
+    if remote_size is not None and tmp_path.stat().st_size != remote_size:
+        raise DownloadError(
+            f"Downloaded size mismatch for {url}: expected={remote_size} actual={tmp_path.stat().st_size}"
+        )
     tmp_path.replace(destination)
     print(f"Download succeeded: {destination}")
+
+
+def open_download_stream(url: str, timeout_seconds: int, ssl_verify: bool, resume_from: int, tmp_path: Path):
+    """按是否断点续传打开下载流。"""
+
+    if resume_from <= 0:
+        return open_url(url, timeout_seconds, ssl_verify), False, 0
+    req = urllib.request.Request(url, headers={"Range": f"bytes={resume_from}-"})
+    try:
+        response = open_url(req, timeout_seconds, ssl_verify)
+        status = response.getcode()
+        if status == 206:
+            return response, True, resume_from
+        # 服务端忽略 Range，降级为全量下载。
+        response.close()
+        cleanup_tmp(tmp_path)
+        return open_url(url, timeout_seconds, ssl_verify), False, 0
+    except HTTPError as exc:
+        # 416 表示 Range 不可用，尝试全量下载兜底。
+        if exc.code == 416:
+            cleanup_tmp(tmp_path)
+            return open_url(url, timeout_seconds, ssl_verify), False, 0
+        raise
+
+
+def print_download_line(url: str, destination: Path, attempt: int, attempts: int, resume_from: int) -> None:
+    """打印下载起始日志。"""
+
+    if resume_from > 0:
+        print(f"Downloading {url} -> {destination} (attempt {attempt}/{attempts}, resume_from={resume_from})")
+        return
+    print(f"Downloading {url} -> {destination} (attempt {attempt}/{attempts})")
+
+
+def validate_resume_tmp(tmp_path: Path, remote_size: Optional[int]) -> int:
+    """校验并返回断点续传偏移量。"""
+
+    if not tmp_path.exists():
+        return 0
+    local = tmp_path.stat().st_size
+    if local <= 0:
+        cleanup_tmp(tmp_path)
+        return 0
+    if remote_size is not None and local > remote_size:
+        cleanup_tmp(tmp_path)
+        return 0
+    return local
+
+
+def effective_total_size(content_length: Optional[int], resume_from: int) -> Optional[int]:
+    """计算用于进度展示的总大小。"""
+
+    if content_length is None:
+        return None
+    return content_length + resume_from
 
 
 def cleanup_tmp(tmp_path: Path) -> None:

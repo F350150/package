@@ -101,13 +101,19 @@ else (否)
   stop
 endif
 
-:清理下载缓存;
-if (清理成功?) then (是)
-  :写入成功状态;
+:清理阶段;
+if (cache_policy=keep_latest?) then (是)
+  :仅保留最新包和签名缓存;
+else (否)
+  :清理下载缓存目录;
+endif
+
+:写入成功状态(install_state + 文件锁);
+if (锁获取/状态写入成功?) then (是)
   :成功退出;
   stop
 else (否)
-  :清理错误退出;
+  :安装错误退出;
   stop
 endif
 
@@ -150,8 +156,8 @@ packages:
    1. 读取安装状态 `installed_version`
    2. 若检测版本切换，先执行旧版本删除
    3. 执行 pre-check 判断是否跳过
-   4. 需要安装时：下载（离线优先）-> 验签 -> 安装 -> 安装后校验 -> 清理
-   5. 成功后写入 `.package-manager/.install_state.yaml`
+   4. 需要安装时：下载（离线优先）-> 验签 -> 安装 -> 安装后校验 -> 清理（含 `keep_latest` 分支）
+   5. 成功后写入 `.package-manager/.install_state.yaml`（写入加锁，支持陈旧锁清理）
    6. 任何异常走统一处理：回滚、临时目录安全清理、映射退出码
 
 ### 1.3 关键分支总览（总流程级）
@@ -164,9 +170,13 @@ packages:
 | 解析分支 | `filename_override` 存在 | 优先使用 override 文件名 |
 | 离线分支 | 本地文件存在且非空 | 直接复用，不下载 |
 | 下载分支 | 网络失败且重试耗尽 | `DownloadError(20)` + 离线提示 |
-| 验签分支 | 根证书缺失或验签失败 | `SignatureVerifyError(40)` |
+| 验签分支 | 签名格式非法或验签失败 | `SignatureVerifyError(40)` |
+| 配置分支 | 内置根证书缺失 | `ConfigError(10)` |
 | pre-check 分支 | 同版本且结构完整 | 跳过安装并刷新成功状态 |
 | 版本切换分支 | `installed_version != target version` | 先清理旧版本 |
+| 状态写入分支 | 活锁超时/状态写入异常 | 包装为 `InstallError(50)` |
+| 下载分支 | 命中 `.tmp` 且服务端支持 Range | 断点续传 |
+| 缓存分支 | `cache_policy=keep_latest` | 成功后保留最新包和签名 |
 | 未知异常分支 | 非 `InstallerError` | 包装为 `InstallError(50)` |
 
 ---
@@ -220,7 +230,12 @@ packages:
 | `src/package_manager/downloader.py` | 下载层 | HEAD 探测、磁盘预检、重试下载、原子替换 | 产品安装语义 |
 | `src/package_manager/verifier.py` | 安全层 | P7S detached 验签、内置 openssl 调用、库路径注入 | 下载与解压 |
 | `src/package_manager/install_state.py` | 状态层 | `.install_state.yaml` 读取/更新/原子写 | 包解析与安装 |
-| `src/package_manager/installers.py` | 安装器层 | 模板方法、产品子类、离线优先策略、回滚清理 | CLI 参数处理 |
+| `src/package_manager/file_lock.py` | 并发控制层 | 文件锁、陈旧锁判定（pid/复用/TTL）、安全释放 | 安装业务编排 |
+| `src/package_manager/installer/base.py` | 安装器基类层 | 模板方法、成功清理策略、异常回滚清理 | CLI 参数处理 |
+| `src/package_manager/installer/registry.py` | 安装器注册层 | 安装器注册表与外部插件自动发现 | 安装执行细节 |
+| `src/package_manager/installer/utils.py` | 安装器工具层 | 离线优先下载、目录重置、rpm/tar 通用工具 | CLI 参数处理 |
+| `src/package_manager/installer/porting_advisor.py` | 产品安装器层 | Porting-Advisor tar 包安装实现 | 通用框架逻辑 |
+| `src/package_manager/installer/porting_cli.py` | 产品安装器层 | devkit-porting rpm + framework 安装实现 | 通用框架逻辑 |
 | `src/package_manager/errors.py` | 错误契约层 | 统一错误类型和退出码 | 业务执行 |
 | `src/package_manager/build_config_renderer.py` | 构建期工具 | 模板 YAML 渲染（替换 `${PACKAGE_VERSION}`） | 运行期安装 |
 
@@ -229,271 +244,10 @@ packages:
 
 #### 2.3.1 类图
 
-```plantuml
-@startuml
-!pragma layout smetana
-skinparam classAttributeIconSize 0
-hide empty members
-
-title package-manager 核心类图（详细结构）
-
-package "入口与编排" {
-  class "main <<module>>" as MainModule {
-    +parse_args(argv) -> argparse.Namespace
-    +main(argv) -> int
-    +normalize_argv(argv) -> List[str]
-  }
-
-  class "service <<module>>" as ServiceModule {
-    +run_with_builtin_config(name) -> int
-    +select_packages(name, runtime) -> List[PackageConfig]
-    +get_packages_by_name(name, packages) -> List[PackageConfig]
-    +run_packages(packages, runtime) -> int
-  }
-}
-
-package "配置与模型" {
-  class RuntimeConfig {
-    +download_defaults: DownloadDefaults
-    +verify_defaults: VerifyDefaults
-    +packages: List[PackageConfig]
-  }
-
-  class DownloadDefaults {
-    +base_url: str
-    +signature_suffix: str
-    +timeout_seconds: int
-    +retry: int
-  }
-
-  class VerifyDefaults {
-    +signature_type: str
-    +signature_format: str
-    +verify_chain: bool
-  }
-
-  class PackageConfig {
-    +product: str
-    +version: str
-    +artifact_version: str
-    +package_format: str
-    +rpm_arch_separator: str
-    +os: str
-    +install_dir: str
-    +filename_override: Optional[str]
-    +supported_versions: Optional[Tuple[str,...]]
-    +enabled: bool
-  }
-
-  class ResolvedPackage {
-    +config: PackageConfig
-    +runtime_arch: str
-    +filename: str
-    +package_url: str
-    +signature_url: str
-    +package_path: Path
-    +signature_path: Path
-  }
-
-  class "config <<module>>" as ConfigModule {
-    +get_runtime_config(reload=False) -> RuntimeConfig
-    -_load_runtime_config() -> RuntimeConfig
-    -_load_raw_config() -> Dict[str,Any]
-  }
-
-  class "PackageNode <<pydantic>>" as PackageNode {
-    +product: str
-    +project_version: str
-    +artifact_version: str
-    +package_format: str
-    +rpm_arch_separator: str
-    +install_dir: str
-    +filename_override: Optional[str]
-    +supported_versions: Optional[List[str]]
-    +enabled: bool
-  }
-
-  class "ConfigNode <<pydantic>>" as ConfigNode {
-    +download_defaults: DownloadDefaultsNode
-    +verify_defaults: VerifyDefaultsNode
-    +packages: List[PackageNode]
-  }
-
-  class "install_state <<module>>" as StateModule {
-    +load_install_state(path=None) -> Dict[str,Any]
-    +get_installed_version(product, path=None) -> Optional[str]
-    +update_install_state(product, version, package_format, path=None) -> None
-  }
-}
-
-package "解析、下载、验签" {
-  class "resolver <<module>>" as ResolverModule {
-    +resolve_package(package, defaults) -> ResolvedPackage
-    +build_filename(package, runtime_arch) -> str
-    +build_project_base_url(base_url_prefix, project_version) -> str
-    +arch_token_for_package(package_format, runtime_arch) -> str
-  }
-
-  class "downloader <<module>>" as DownloaderModule {
-    +download_file(url, destination, timeout_seconds, retry, ssl_verify=False) -> None
-    +get_remote_file_size(url, timeout_seconds, ssl_verify=False) -> Optional[int]
-    +ensure_disk_space(destination, expected_size) -> None
-    +do_download_with_retry(...) -> None
-  }
-
-  class "verifier <<module>>" as VerifierModule {
-    +verify_p7s_detached(package_path, signature_path, root_ca, signature_format, verify_chain) -> None
-    +resolve_openssl_command() -> str
-    +inject_openssl_library_env(env) -> None
-  }
-}
-
-package "安装器" {
-  class PreCheckResult {
-    +should_install: bool
-    +reason: str
-  }
-
-  abstract class BaseInstaller {
-    -resolved: ResolvedPackage
-    -download_defaults: DownloadDefaults
-    -verify_defaults: VerifyDefaults
-    +run() -> None
-    +prepare() -> None
-    +download() -> None
-    +verify_signature() -> None
-    +pre_check(installed_version) -> PreCheckResult
-    +remove_previous_version(installed_version) -> None
-    +install() -> None
-    +post_install_check() -> None
-    +rollback() -> None
-    +cleanup_temp() -> None
-    +cleanup_after_success() -> None
-  }
-
-  class TarGzInstaller {
-    +pre_check(...) -> PreCheckResult
-    +remove_previous_version(...) -> None
-    +install() -> None
-    +post_install_check() -> None
-    +rollback() -> None
-  }
-
-  class RpmInstaller {
-    +rpm_package_name() -> str
-    +pre_check(...) -> PreCheckResult
-    +remove_previous_version(...) -> None
-    +install() -> None
-    +post_install_check() -> None
-    +rollback() -> None
-  }
-
-  class PortingAdvisorTarGzInstaller {
-    +pre_check(...) -> PreCheckResult
-    +install() -> None
-    +post_install_check() -> None
-  }
-
-  class PortingCliRpmInstaller {
-    +download() -> None
-    +verify_signature() -> None
-    +install() -> None
-    -_framework_filename() -> str
-    -_framework_package_url() -> str
-    -_framework_signature_url() -> str
-    -_framework_package_path() -> Path
-    -_framework_signature_path() -> Path
-  }
-
-  class "installers <<module>>" as InstallersModule {
-    +get_installer_class(config) -> Type[BaseInstaller]
-    +ensure_local_or_download(url, destination, timeout_seconds, retry) -> None
-    +resolve_install_dir(resolved) -> Path
-    +install_porting_advisor_runtime_layout(payload_dir, install_dir) -> None
-  }
-}
-
-package "基础设施" {
-  class "paths <<module>>" as PathsModule {
-    +app_dir() -> Path
-    +internal_dir() -> Path
-    +runtime_config_path() -> Path
-    +root_ca_path() -> Path
-    +openssl_bin_path() -> Path
-    +openssl_lib_dir() -> Path
-    +download_dir() -> Path
-    +install_state_path() -> Path
-  }
-
-  class InstallerError {
-    +exit_code: int
-  }
-  class ConfigError
-  class DownloadError
-  class SignatureVerifyError
-  class InstallError
-  class CleanupError
-}
-
-MainModule ..> ServiceModule : 调用
-MainModule ..> InstallerError : 统一异常映射
-
-ServiceModule ..> ConfigModule : 读取 RuntimeConfig
-ServiceModule ..> ResolverModule : 解析包
-ServiceModule ..> InstallersModule : 选择/实例化安装器
-
-ConfigModule ..> ConfigNode : 校验 YAML
-ConfigModule ..> RuntimeConfig : 构建运行时对象
-RuntimeConfig *-- DownloadDefaults
-RuntimeConfig *-- VerifyDefaults
-RuntimeConfig *-- "*" PackageConfig
-ResolvedPackage *-- PackageConfig
-
-ResolverModule ..> PackageConfig
-ResolverModule ..> DownloadDefaults
-ResolverModule ..> ResolvedPackage
-ResolverModule ..> PathsModule : download_dir()
-
-InstallersModule ..> BaseInstaller : 注册与工厂
-BaseInstaller o-- ResolvedPackage
-BaseInstaller o-- DownloadDefaults
-BaseInstaller o-- VerifyDefaults
-BaseInstaller ..> StateModule : 读写安装状态
-BaseInstaller ..> VerifierModule : 验签
-BaseInstaller ..> PathsModule : 根证书/目录
-BaseInstaller ..> DownloaderModule : 下载
-BaseInstaller ..> PreCheckResult
-
-TarGzInstaller --|> BaseInstaller
-RpmInstaller --|> BaseInstaller
-PortingAdvisorTarGzInstaller --|> TarGzInstaller
-PortingCliRpmInstaller --|> RpmInstaller
-
-ConfigError --|> InstallerError
-DownloadError --|> InstallerError
-SignatureVerifyError --|> InstallerError
-InstallError --|> InstallerError
-CleanupError --|> InstallerError
-
-note bottom of PackageConfig
-version = 项目版本（决定下载目录、安装状态）
-artifact_version = 产物版本（决定包文件名）
-install_dir = 必填，安装目标目录唯一来源
-end note
-
-note bottom of BaseInstaller
-模板方法顺序固定：
-prepare -> download -> verify_signature -> install -> post_install_check -> cleanup_after_success
-异常路径统一：rollback_safely + cleanup_temp_safely
-end note
-
-@enduml
-
-
-```
+1. [core_class_detail.puml](/Users/fxl/pycharm_projects/package/docs/puml/core_class_detail.puml)
 
 1. 分层结构：
-   1. `main -> service -> resolver/installers -> downloader/verifier/state` 单向依赖，避免环依赖。
+   1. `main -> service -> resolver/installer -> downloader/verifier/state` 单向依赖，避免环依赖。
    2. 上层只编排不做底层细节，下层只做单一职责能力。
 2. 数据驱动思路：
    1. `PackageConfig` 与 `ResolvedPackage` 分离，前者描述配置语义，后者描述执行语义。
@@ -506,14 +260,14 @@ end note
 4. 后续扩展方式：
    1. 新增产品（不新增包格式）：
       1. 在 YAML 增加 product 配置项。
-      2. 在 `installers.py` 新增产品安装器子类并注册到 `INSTALLER_REGISTRY`。
+      2. 在 `src/package_manager/installer/` 新增产品安装器子类并通过 `registry.py` 自动发现注册。
    2. 新增包格式：
       1. 在 `constants.py` 扩展格式常量。
       2. 在 `resolver.py` 增加文件名与架构 token 规则。
       3. 增加对应中间安装器或产品安装器实现。
    3. 新增验签机制：
       1. 在 `verifier.py` 增加新验证函数。
-      2. 在 `installers.py` 的 `verify_signature` 阶段按配置选择调用。
+      2. 在 `installer/base.py` 的 `verify_signature` 阶段按配置选择调用。
    4. 新增 pre-check 规则：
       1. 优先在具体产品安装器重写 `pre_check`，避免污染 `BaseInstaller` 通用模板。
 5. 设计守则：
@@ -721,7 +475,7 @@ title 下载器流程与异常分支（downloader.py）
 
 ' 说明：
 ' 该流程仅在“本地文件缺失或空文件”时触发。
-' 本地命中分支在 installers.ensure_local_or_download 中处理。
+' 本地命中分支在 installer/utils.ensure_local_or_download 中处理。
 
 start
 :download_file(url,destination,timeout,retry);
@@ -744,7 +498,13 @@ endif
 :attempts = max(1,retry);
 
 repeat
-  :清理历史 tmp;
+  :校验 tmp 是否可续传;
+  if (tmp 存在且 0<size<=remote_size?) then (yes)
+    :resume_from = tmp_size;
+  else (no)
+    :清理不可用 tmp;
+    :resume_from = 0;
+  endif
   :建立 TLS 上下文;
   if (TLS_INSECURE=1?) then (yes)
     :禁用证书校验并告警;
@@ -753,7 +513,17 @@ repeat
     :加载 TLS_CA_FILE_ENV (若配置);
   endif
 
-  :urlopen + 流式写入 tmp;
+  if (resume_from > 0?) then (yes)
+    :带 Range 请求下载;
+    if (服务端返回 206?) then (yes)
+      :追加写入 tmp;
+    else (no)
+      :降级全量下载(清理 tmp 后重下);
+    endif
+  else (no)
+    :全量下载;
+  endif
+  :流式写入 tmp;
   if (下载流异常?) then (yes)
     :记录失败 attempt;
     :清理 tmp;
@@ -827,6 +597,46 @@ endif
 @enduml
 
 ```
+7. [install_state_lock_activity.puml]
+```plantuml
+@startuml
+
+title install_state 写入加锁流程（file_lock.py）
+
+start
+:update_install_state(...);
+:lock_path = state_path + ".lock";
+
+repeat
+  if (创建锁文件成功?) then (yes)
+    :写入锁元数据(pid/host/created_at/start_token/token);
+    break
+  else (no)
+    :读取已有锁元数据并判定陈旧;
+    if (同机 pid 不存在?) then (yes)
+      :删除陈旧锁;
+    elseif (pid 复用?) then (yes)
+      :删除陈旧锁;
+    elseif (TTL 超时?) then (yes)
+      :删除陈旧锁;
+    else (no)
+      :等待并重试;
+    endif
+  endif
+repeat while (未超时)
+
+if (超时?) then (yes)
+  :TimeoutError(holder metadata);
+  stop
+else (no)
+endif
+
+:更新 state 并原子写入;
+:按 token+inode 安全释放锁;
+stop
+
+@enduml
+```
 
 
 #### 2.4.3 子流程要点说明
@@ -878,16 +688,17 @@ endif
 |---|---|---|---|
 | `tests/test_config_runtime.py` | `config.py` | YAML 解析错误、字段缺失、版本不在支持范围、rpm 分隔符非法 | 抛出 `ConfigError(10)` 且错误信息匹配 |
 | `tests/test_resolver.py` | `resolver.py` | 双版本语义、rpm `-`/`.` 规则、架构 token、URL 拼接 | 解析结果 `filename/package_url/path` 精确匹配 |
-| `tests/test_porting_cli_urls.py` | `resolver.py` + `installers.py` | devkit framework URL 必须跟随项目版本目录 | URL 与预期完全一致 |
-| `tests/test_downloader.py` | `downloader.py` | 重试、空间不足、空文件、防重复下载、TLS 分支 | 抛错类型与日志证据符合预期 |
+| `tests/test_porting_cli_urls.py` | `resolver.py` + `installer/porting_cli.py` | devkit framework URL 必须跟随项目版本目录 | URL 与预期完全一致 |
+| `tests/test_downloader.py` | `downloader.py` | 重试、空间不足、空文件、防重复下载、断点续传、TLS 分支 | 抛错类型与日志证据符合预期 |
 | `tests/test_p7s_verifier.py` | `verifier.py` | 格式非法、根证书缺失、链校验开关、命令失败 | 返回成功或抛出 `SignatureVerifyError(40)` |
 | `tests/test_install_state.py` | `install_state.py` | 状态读取、损坏 YAML、原子写后读回 | 状态字段与写入值一致 |
-| `tests/test_installer_flow.py` | `installers.py` | pre-check skip、版本切换、安装失败回滚、清理失败保护主错误 | 调用序列与最终异常符合模板方法预期 |
+| `tests/test_file_lock.py` | `file_lock.py` | 死进程锁回收、TTL 回收、活锁超时保护 | 锁行为符合预期，不误删活锁 |
+| `tests/test_installer_flow.py` | `installer/base.py` | pre-check skip、版本切换、安装失败回滚、清理失败保护主错误 | 调用序列与最终异常符合模板方法预期 |
 | `tests/test_installer_service.py` | `service.py` | `--name` 选择逻辑、空值校验、无匹配产品 | 抛 `ConfigError(10)` 或返回 0 |
 | `tests/test_main.py` | `main.py` | 参数透传、异常映射退出码 | 退出码稳定 |
 | `tests/test_paths.py` | `paths.py` | 打包态/开发态路径解析、配置路径优先级 | 路径选择符合设计 |
-| `tests/test_porting_advisor_layout.py` | `installers.py` | Porting Advisor 成品布局校验与提取流程 | `config/jre/jar` 布局可验证 |
-| `tests/test_registry.py` | `installers.py` | 安装器注册映射与未知映射异常 | 返回正确安装器类型或 `ConfigError` |
+| `tests/test_porting_advisor_layout.py` | `installer/porting_advisor.py` | Porting Advisor 成品布局校验与提取流程 | `config/jre/jar` 布局可验证 |
+| `tests/test_registry.py` | `installer/registry.py` | 安装器注册映射与未知映射异常 | 返回正确安装器类型或 `ConfigError` |
 
 ### 4.3 IT/E2E 用例设计（场景矩阵）
 
@@ -912,7 +723,7 @@ endif
 | S15 | 伪造不支持架构 | resolver arch fail | `rc=10` |
 | S16 | 同版本但安装目录缺失 | pre-check 需重装 | `rc=0` 且不能 skip |
 | S18 | devkit-porting 目录整理失败 | install fail | `rc=50` |
-| S19 | 根证书缺失 | verify_chain fail | `rc=40` |
+| S19 | 根证书缺失 | config/root_ca fail | `rc=10` |
 | S20 | 清理失败路径 | safe cleanup & wrap | `rc=50` 且主错误不被覆盖 |
 | S21 | PA 包+签名本地命中，网络不可达 | offline local hit | `rc=0` 且出现 `Use local artifact file` |
 | S22 | PA 主包命中，签名缺失可在线补齐 | mixed local/online | `rc=0` |
@@ -923,4 +734,8 @@ endif
 | S27 | DP framework 主包缺失且网络不可达 | offline fail hint | `rc=20` |
 | S28 | DP framework 主包空文件且网络不可达 | offline fail hint | `rc=20` |
 | S29 | DP framework 签名缺失且网络不可达 | offline fail hint | `rc=20` |
-
+| S30 | 并发状态写入锁，16 进程并发更新状态 | state lock concurrency | `rc=0` 且 state 记录完整 |
+| S31 | 预置 `.tmp` 后断点续传 | HTTP Range resume | `rc=0` 且命中 `resume_from`/`206` 证据 |
+| S32 | `keep_latest` 缓存策略 | cache policy | `rc=0` 且离线重装复用本地缓存 |
+| S33 | 预置陈旧锁后安装 | stale lock reclaim | `rc=0` 且陈旧锁被清理 |
+| S34 | 活锁保护 | live lock protect | `rc=0` 且竞争方超时、活锁不误删 |

@@ -4,7 +4,7 @@ import pytest
 
 from package_manager.errors import DownloadError, InstallError, SignatureVerifyError
 from package_manager.models import DownloadDefaults, PackageConfig, ResolvedPackage, VerifyDefaults
-from package_manager.installers import BaseInstaller, PreCheckResult
+from package_manager.installer import BaseInstaller, PreCheckResult
 
 
 class DummyInstaller(BaseInstaller):
@@ -59,13 +59,21 @@ def _installer(tmp_path: Path) -> DummyInstaller:
     )
 
 
+def _installer_keep_latest(tmp_path: Path) -> DummyInstaller:
+    return DummyInstaller(
+        _resolved(tmp_path),
+        DownloadDefaults(base_url="http://x", cache_policy="keep_latest"),
+        VerifyDefaults(),
+    )
+
+
 def test_run_success(monkeypatch, tmp_path):
     inst = _installer(tmp_path)
 
-    monkeypatch.setattr("package_manager.installers.download_file", lambda *a, **k: None)
-    monkeypatch.setattr("package_manager.installers.verify_p7s_detached", lambda *a, **k: None)
-    monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
-    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
+    monkeypatch.setattr("package_manager.installer.utils.download_file", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installer.base.verify_p7s_detached", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installer.base.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installer.base.update_install_state", lambda **kwargs: None)
 
     inst.run()
     assert inst.install_called is True
@@ -77,10 +85,10 @@ def test_download_failure_cleanup(monkeypatch, tmp_path):
     def fail_download(*a, **k):
         raise DownloadError("d")
 
-    monkeypatch.setattr("package_manager.installers.download_file", fail_download)
-    monkeypatch.setattr("package_manager.installers.verify_p7s_detached", lambda *a, **k: None)
-    monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
-    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
+    monkeypatch.setattr("package_manager.installer.utils.download_file", fail_download)
+    monkeypatch.setattr("package_manager.installer.base.verify_p7s_detached", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installer.base.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installer.base.update_install_state", lambda **kwargs: None)
 
     with pytest.raises(DownloadError):
         inst.run()
@@ -93,14 +101,14 @@ def test_download_failure_cleanup(monkeypatch, tmp_path):
 def test_signature_failure_no_install(monkeypatch, tmp_path):
     inst = _installer(tmp_path)
 
-    monkeypatch.setattr("package_manager.installers.download_file", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installer.utils.download_file", lambda *a, **k: None)
 
     def fail_sig(*a, **k):
         raise SignatureVerifyError("s")
 
-    monkeypatch.setattr("package_manager.installers.verify_p7s_detached", fail_sig)
-    monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
-    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
+    monkeypatch.setattr("package_manager.installer.base.verify_p7s_detached", fail_sig)
+    monkeypatch.setattr("package_manager.installer.base.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installer.base.update_install_state", lambda **kwargs: None)
 
     with pytest.raises(SignatureVerifyError):
         inst.run()
@@ -117,10 +125,10 @@ def test_install_failure_rollback_and_cleanup(monkeypatch, tmp_path):
 
     inst.install = fail_install
 
-    monkeypatch.setattr("package_manager.installers.download_file", lambda *a, **k: None)
-    monkeypatch.setattr("package_manager.installers.verify_p7s_detached", lambda *a, **k: None)
-    monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
-    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
+    monkeypatch.setattr("package_manager.installer.utils.download_file", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installer.base.verify_p7s_detached", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installer.base.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installer.base.update_install_state", lambda **kwargs: None)
 
     with pytest.raises(InstallError):
         inst.run()
@@ -131,11 +139,11 @@ def test_install_failure_rollback_and_cleanup(monkeypatch, tmp_path):
 
 def test_version_switch_calls_remove_previous(monkeypatch, tmp_path):
     inst = _installer(tmp_path)
-    monkeypatch.setattr("package_manager.installers.get_installed_version", lambda _p: "0.9")
-    monkeypatch.setattr("package_manager.installers.download_file", lambda *a, **k: None)
-    monkeypatch.setattr("package_manager.installers.verify_p7s_detached", lambda *a, **k: None)
-    monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
-    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
+    monkeypatch.setattr("package_manager.installer.base.get_installed_version", lambda _p: "0.9")
+    monkeypatch.setattr("package_manager.installer.utils.download_file", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installer.base.verify_p7s_detached", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installer.base.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installer.base.update_install_state", lambda **kwargs: None)
 
     inst.run()
     assert inst.remove_previous_called is True
@@ -146,7 +154,7 @@ def test_precheck_skip_does_not_install(monkeypatch, tmp_path):
     inst = _installer(tmp_path)
     inst.precheck_result = PreCheckResult(should_install=False, reason="already installed")
     state_calls = []
-    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: state_calls.append(kwargs))
+    monkeypatch.setattr("package_manager.installer.base.update_install_state", lambda **kwargs: state_calls.append(kwargs))
 
     inst.run()
     assert inst.install_called is False
@@ -158,10 +166,10 @@ def test_download_uses_local_files_without_network(monkeypatch, tmp_path):
     inst.resolved.package_path.write_bytes(b"pkg")
     inst.resolved.signature_path.write_bytes(b"sig")
     download_calls = []
-    monkeypatch.setattr("package_manager.installers.download_file", lambda *a, **k: download_calls.append((a, k)))
-    monkeypatch.setattr("package_manager.installers.verify_p7s_detached", lambda *a, **k: None)
-    monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
-    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
+    monkeypatch.setattr("package_manager.installer.utils.download_file", lambda *a, **k: download_calls.append((a, k)))
+    monkeypatch.setattr("package_manager.installer.base.verify_p7s_detached", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installer.base.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installer.base.update_install_state", lambda **kwargs: None)
 
     inst.run()
 
@@ -175,10 +183,10 @@ def test_download_failure_contains_offline_hint(monkeypatch, tmp_path):
     def fail_download(*_a, **_k):
         raise DownloadError("network down")
 
-    monkeypatch.setattr("package_manager.installers.download_file", fail_download)
-    monkeypatch.setattr("package_manager.installers.verify_p7s_detached", lambda *a, **k: None)
-    monkeypatch.setattr("package_manager.installers.root_ca_path", lambda: tmp_path / "ca.pem")
-    monkeypatch.setattr("package_manager.installers.update_install_state", lambda **kwargs: None)
+    monkeypatch.setattr("package_manager.installer.utils.download_file", fail_download)
+    monkeypatch.setattr("package_manager.installer.base.verify_p7s_detached", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installer.base.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installer.base.update_install_state", lambda **kwargs: None)
 
     with pytest.raises(DownloadError) as excinfo:
         inst.run()
@@ -186,3 +194,25 @@ def test_download_failure_contains_offline_hint(monkeypatch, tmp_path):
     message = str(excinfo.value)
     assert "Offline install hint" in message
     assert str(inst.resolved.package_path) in message
+
+
+def test_keep_latest_cache_policy_keeps_downloaded_files(monkeypatch, tmp_path):
+    inst = _installer_keep_latest(tmp_path)
+    inst.resolved.package_path.write_bytes(b"pkg")
+    inst.resolved.signature_path.write_bytes(b"sig")
+    (inst.resolved.package_path.parent / "old.bin").write_bytes(b"old")
+    (inst.resolved.package_path.parent / "_extract").mkdir(parents=True, exist_ok=True)
+    (inst.resolved.package_path.parent / "temp.tmp").write_bytes(b"tmp")
+
+    monkeypatch.setattr("package_manager.installer.utils.download_file", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installer.base.verify_p7s_detached", lambda *a, **k: None)
+    monkeypatch.setattr("package_manager.installer.base.root_ca_path", lambda: tmp_path / "ca.pem")
+    monkeypatch.setattr("package_manager.installer.base.update_install_state", lambda **kwargs: None)
+
+    inst.run()
+
+    assert inst.resolved.package_path.exists()
+    assert inst.resolved.signature_path.exists()
+    assert not (inst.resolved.package_path.parent / "old.bin").exists()
+    assert not (inst.resolved.package_path.parent / "_extract").exists()
+    assert not (inst.resolved.package_path.parent / "temp.tmp").exists()

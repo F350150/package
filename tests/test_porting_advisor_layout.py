@@ -1,4 +1,4 @@
-from package_manager.installers import (
+from package_manager.installer import (
     detect_porting_advisor_payload_dir,
     has_porting_advisor_payload_archives,
     has_porting_advisor_runtime_layout,
@@ -35,13 +35,13 @@ def test_install_porting_advisor_runtime_layout(tmp_path):
         return None
 
     # 只验证安装器产物拷贝逻辑，不依赖真实 tar 解压。
-    import package_manager.installers as installers
+    import package_manager.installer.utils as installer_utils
 
-    original = installers.extract_tar_package
-    installers.extract_tar_package = fake_extract_tar
+    original = installer_utils.extract_tar_package
+    installer_utils.extract_tar_package = fake_extract_tar
     try:
         install_porting_advisor_runtime_layout(payload, install_dir)
     finally:
-        installers.extract_tar_package = original
+        installer_utils.extract_tar_package = original
 
     assert has_porting_advisor_runtime_layout(install_dir) is True

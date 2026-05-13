@@ -92,13 +92,19 @@ else (否)
   stop
 endif
 
-:清理下载缓存;
-if (清理成功?) then (是)
-  :写入成功状态;
+:清理阶段;
+if (cache_policy=keep_latest?) then (是)
+  :仅保留最新包/签名缓存;
+else (否)
+  :清理下载缓存目录;
+endif
+
+:写入成功状态(install_state + 文件锁);
+if (锁获取/状态写入成功?) then (是)
   :成功退出;
   stop
 else (否)
-  :清理错误退出;
+  :安装错误退出;
   stop
 endif
 

@@ -8,8 +8,10 @@ participant "main.py" as Main
 participant "service.py" as Service
 participant "config.py" as Config
 participant "resolver.py" as Resolver
-participant "installers.py\n(BaseInstaller 子类)" as Installer
+participant "installer.registry.py" as Registry
+participant "installer/base.py\n(BaseInstaller 子类)" as Installer
 participant "install_state.py" as State
+participant "file_lock.py" as Lock
 participant "downloader.py" as Downloader
 participant "verifier.py" as Verifier
 
@@ -22,6 +24,8 @@ Service -> Service: select_packages(name)
 loop 每个 PackageConfig
   Service -> Resolver: resolve_package(pkg, defaults)
   Resolver --> Service: ResolvedPackage
+  Service -> Registry: get_installer_class(pkg)
+  Registry --> Service: installer_cls
   Service -> Installer: installer.run()
 
     Installer -> State: get_installed_version(product)
@@ -34,6 +38,7 @@ loop 每个 PackageConfig
     Installer -> Installer: pre_check(installed_version)
     alt pre_check == skip
       Installer -> State: update_install_state(success)
+      State -> Lock: acquire/reclaim-stale/release
       Installer --> Service: return
     else pre_check == install
       Installer -> Installer: ensure_local_or_download(package)
@@ -61,8 +66,13 @@ loop 每个 PackageConfig
 
       Installer -> Installer: install()\n(产品子类实现)
       Installer -> Installer: post_install_check()
-      Installer -> Installer: cleanup_after_success()
+      alt cache_policy == keep_latest
+        Installer -> Installer: keep_latest_cache()
+      else cache_policy != keep_latest
+        Installer -> Installer: cleanup_temp()
+      end
       Installer -> State: update_install_state(success)
+      State -> Lock: acquire/reclaim-stale/release
       Installer --> Service: return
     end
 

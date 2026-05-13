@@ -1,14 +1,17 @@
 """安装状态存储（隐藏 YAML 文件）。"""
 
 import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from package_manager.errors import ConfigError
+from package_manager.file_lock import FileLock
 from package_manager.paths import install_state_path
 
 INSTALL_STATE_FILE_ENV = "PACKAGE_MANAGER_INSTALL_STATE_FILE"
+STATE_LOCK_SUFFIX = ".lock"
 
 
 def _load_yaml_module():
@@ -31,6 +34,12 @@ def load_install_state(path: Optional[Path] = None) -> Dict[str, Any]:
     """读取安装状态，异常转换为配置错误。"""
 
     target = path or _resolve_state_path()
+    return _load_install_state_from_path(target)
+
+
+def _load_install_state_from_path(target: Path) -> Dict[str, Any]:
+    """从指定路径读取安装状态。"""
+
     if not target.exists():
         return _initial_state()
     yaml = _load_yaml_module()
@@ -52,7 +61,7 @@ def load_install_state(path: Optional[Path] = None) -> Dict[str, Any]:
 def get_installed_version(product: str, path: Optional[Path] = None) -> Optional[str]:
     """获取某个产品记录的已安装版本。"""
 
-    state = load_install_state(path)
+    state = _load_install_state_from_path(path or _resolve_state_path())
     node = state.get("products", {}).get(product)
     if not isinstance(node, dict):
         return None
@@ -69,15 +78,17 @@ def update_install_state(
     """更新某个产品的安装状态（仅安装成功后调用）。"""
 
     target = path or _resolve_state_path()
-    state = load_install_state(target)
-    products = state.setdefault("products", {})
-    products[product] = {
-        "installed_version": version,
-        "installed_at": datetime.now(timezone.utc).isoformat(),
-        "package_format": package_format,
-        "last_result": "success",
-    }
-    _atomic_write_yaml(target, state)
+    lock_path = target.with_name(f"{target.name}{STATE_LOCK_SUFFIX}")
+    with FileLock(lock_path):
+        state = _load_install_state_from_path(target)
+        products = state.setdefault("products", {})
+        products[product] = {
+            "installed_version": version,
+            "installed_at": datetime.now(timezone.utc).isoformat(),
+            "package_format": package_format,
+            "last_result": "success",
+        }
+        _atomic_write_yaml(target, state)
 
 
 def _atomic_write_yaml(path: Path, data: Dict[str, Any]) -> None:
@@ -85,10 +96,19 @@ def _atomic_write_yaml(path: Path, data: Dict[str, Any]) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     yaml = _load_yaml_module()
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as fp:
-        yaml.safe_dump(data, fp, sort_keys=False, allow_unicode=False)
-    tmp_path.replace(path)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f"{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            yaml.safe_dump(data, fp, sort_keys=False, allow_unicode=False)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _resolve_state_path() -> Path:

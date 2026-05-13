@@ -10,7 +10,7 @@ from typing import Iterable, List, Optional
 
 from package_manager.config import RuntimeConfig, get_runtime_config
 from package_manager.errors import ConfigError
-from package_manager.installers import get_installer_class
+from package_manager.installer import get_installer_class
 from package_manager.models import PackageConfig
 from package_manager.resolver import resolve_package
 

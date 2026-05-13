@@ -1,0 +1,39 @@
+@startuml
+
+title install_state 写入加锁流程（file_lock.py）
+
+start
+:update_install_state(...);
+:lock_path = state_path + ".lock";
+
+repeat
+  if (创建锁文件成功?) then (yes)
+    :写入锁元数据(pid/host/created_at/start_token/token);
+    break
+  else (no)
+    :读取已有锁元数据;
+    if (同机 pid 不存在?) then (yes)
+      :判定陈旧锁 -> 删除;
+    elseif (同机 pid 存在但 start_token 不一致?) then (yes)
+      :判定 PID 复用 -> 删除;
+    elseif (created_at 超过 TTL?) then (yes)
+      :判定陈旧锁 -> 删除;
+    else (no)
+      :判定活锁，等待 poll_interval;
+    endif
+  endif
+repeat while (未超时)
+
+if (超时?) then (yes)
+  :TimeoutError(holder metadata);
+  stop
+else (no)
+endif
+
+:读取 state;
+:更新 products[product];
+:原子写入 YAML;
+:仅删除本人持有锁(token+inode校验);
+stop
+
+@enduml

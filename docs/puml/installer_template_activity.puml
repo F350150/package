@@ -32,8 +32,17 @@ partition "主流程" {
   :pre_install();
   :install();
   :post_install_check();
-  :cleanup_after_success();
+  if (cache_policy == keep_latest?) then (yes)
+    :keep_latest_cache();
+  else (no)
+    :cleanup_temp();
+  endif
   :record_install_success();
+  note right
+    record_install_success() 内部：
+    update_install_state() -> FileLock
+    自动清理陈旧锁
+  end note
 }
 
 :打印 completed;

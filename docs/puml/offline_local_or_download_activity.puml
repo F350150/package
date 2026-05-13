@@ -1,6 +1,6 @@
 @startuml
 
-title 离线优先决策流程（ensure_local_or_download）
+title 离线优先决策流程（installer/utils.ensure_local_or_download）
 
 start
 :输入 url + destination;

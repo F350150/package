@@ -25,3 +25,17 @@ def test_update_install_state_then_get_version(tmp_path: Path):
     )
 
     assert get_installed_version("demo", path=state) == "1.2.3"
+
+
+def test_update_install_state_no_stale_lock_file(tmp_path: Path):
+    state = tmp_path / ".install_state.yaml"
+    lock = tmp_path / ".install_state.yaml.lock"
+
+    update_install_state(
+        product="demo",
+        version="1.2.3",
+        package_format="rpm",
+        path=state,
+    )
+
+    assert not lock.exists()

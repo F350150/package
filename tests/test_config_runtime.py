@@ -156,3 +156,28 @@ packages:
 
     with pytest.raises(ConfigError, match="install_dir"):
         get_runtime_config(reload=True)
+
+
+def test_get_runtime_config_invalid_cache_policy_raises(tmp_path: Path, monkeypatch):
+    cfg = tmp_path / "packages.yaml"
+    cfg.write_text(
+        """
+download_defaults:
+  base_url: "https://example.com/"
+  cache_policy: "unknown"
+verify_defaults:
+  signature_format: "DER"
+packages:
+  - product: "demo"
+    project_version: "1.2.3"
+    artifact_version: "1.2.3-7"
+    package_format: "tar.gz"
+    supported_versions: ["1.2.3"]
+    install_dir: "_internal/demo"
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PACKAGE_MANAGER_CONFIG_FILE", str(cfg))
+
+    with pytest.raises(ConfigError, match="cache_policy"):
+        get_runtime_config(reload=True)

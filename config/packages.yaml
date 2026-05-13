@@ -3,6 +3,7 @@ download_defaults:
   signature_suffix: ".p7s"
   timeout_seconds: 300
   retry: 3
+  cache_policy: "cleanup"
 
 verify_defaults:
   signature_type: "p7s"

@@ -16,6 +16,11 @@ PKG_FMT_RPM = "rpm"
 PKG_FMT_TAR_GZ = "tar.gz"
 SUPPORTED_PACKAGE_FORMATS = {PKG_FMT_RPM, PKG_FMT_TAR_GZ}
 
+# Download cache policy
+CACHE_POLICY_CLEANUP = "cleanup"
+CACHE_POLICY_KEEP_LATEST = "keep_latest"
+SUPPORTED_CACHE_POLICIES = {CACHE_POLICY_CLEANUP, CACHE_POLICY_KEEP_LATEST}
+
 # Common file suffix
 SUFFIX_RPM = ".rpm"
 SUFFIX_TAR_GZ = ".tar.gz"
@@ -23,4 +28,3 @@ SUFFIX_TAR_GZ = ".tar.gz"
 # Products
 PRODUCT_PORTING_ADVISOR = "DevKit-Porting-Advisor"
 PRODUCT_PORTING_CLI = "devkit-porting"
-

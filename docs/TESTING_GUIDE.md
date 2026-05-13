@@ -36,6 +36,10 @@
 2. `tests/test_install_state.py`
    - 状态 YAML 损坏 -> `ConfigError`。
    - 状态更新后可读回版本。
+3. `tests/test_file_lock.py`
+   - 死进程锁自动回收。
+   - TTL 过期锁自动回收。
+   - 活锁超时保护，不误删持锁文件。
 
 ### 3.2 解析层
 1. `tests/test_resolver.py`
@@ -73,6 +77,7 @@
 ### 3.5 下载与验签
 1. `tests/test_downloader.py`
    - 下载成功、失败、空文件、空间不足、TLS 配置分支。
+   - 断点续传（Range）与降级全量下载分支。
 2. `tests/test_p7s_verifier.py`
    - 验签成功、验签失败。
    - verify_chain 真假分支。
@@ -110,6 +115,11 @@
 26. `S27` devkit-porting framework 主包缺失且网络不可达，提示离线投放路径。
 27. `S28` devkit-porting framework 主包为空文件且网络不可达，提示离线投放路径。
 28. `S29` devkit-porting framework 签名缺失且网络不可达，提示离线投放路径。
+29. `S30` 并发状态写入锁：多进程并发更新 install_state 不丢记录。
+30. `S31` 断点续传：预置 `.tmp` 后走 HTTP Range 续传并安装成功。
+31. `S32` 缓存策略 `keep_latest`：保留缓存并在离线重装时复用本地包。
+32. `S33` 陈旧锁清理：预置 stale `.lock` 后安装成功并更新状态。
+33. `S34` 活锁保护：持锁进程存活时竞争方超时且锁不被误删。
 
 说明：`S17` 当前按产品策略显式跳过。
 
@@ -129,7 +139,11 @@
 | 版本切换分支 | installed != target | `test_installer_flow.py` | `S06`,`S07` |
 | 下载分支 | 成功/失败/重试 | `test_downloader.py` | `S01`,`S03`,`S13` |
 | 离线优先分支 | 本地命中/缺失下载/缺失且不可下载/空文件 | `test_installer_flow.py` | `S21`~`S29` |
-| 验签分支 | 成功/失败/缺根证书 | `test_p7s_verifier.py` | `S14`,`S19` |
+| 下载续传分支 | `.tmp` 续传/Range 命中/降级全量 | `test_downloader.py` | `S31` |
+| 缓存策略分支 | `keep_latest` 保留最新缓存 | `test_installer_flow.py` | `S32` |
+| 文件锁分支 | 陈旧锁回收/活锁保护 | `test_file_lock.py` | `S30`,`S33`,`S34` |
+| 验签分支 | 成功/失败 | `test_p7s_verifier.py` | `S14` |
+| 配置/证书分支 | 内置根证书缺失 | `test_paths.py` | `S19` |
 | 安装异常分支 | 安装失败/目录整理失败 | `test_installer_flow.py` | `S18` |
 | 清理分支 | cleanup 成功/失败 | `test_installer_flow.py` | `S09`,`S20` |
 | 状态文件分支 | 读坏/写回/读回 | `test_install_state.py` | `S11` |
@@ -164,10 +178,12 @@ cd /Users/fxl/pycharm_projects/package
 1. summary 中 `failed=0`。
 2. 所有场景退出码与预期一致。
 3. S08/S09 文件系统断言通过。
-4. 关键异常场景（S13/S14/S18/S19/S20/S23/S24/S27/S28/S29）日志包含预期关键字。
+4. 关键异常场景（S13/S14/S18/S19/S20/S23/S24/S27/S28/S29/S34）日志包含预期关键字。
 5. 离线提示场景日志必须包含 `Offline install hint` 和目标投放路径。
+6. 续传场景需出现 `resume_from` 且命中 `range_status=206`。
+7. 锁场景需验证：S33 陈旧锁被清理，S34 活锁不被误删。
 
 ## 9. 回归建议
-1. 每次改动 `resolver/config/installers` 任一模块时至少跑 UT。
+1. 每次改动 `resolver/config/installer` 任一模块时至少跑 UT。
 2. 版本语义、下载 URL、安装器流程有改动时必须跑 E2E。
 3. 发布前保留最近一次 E2E `summary.txt` 与日志目录以便审计。

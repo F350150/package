@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from package_manager.installers import PortingCliRpmInstaller
+from package_manager.installer import PortingCliRpmInstaller
 from package_manager.models import DownloadDefaults, PackageConfig, ResolvedPackage, VerifyDefaults
 
 

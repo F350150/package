@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-from package_manager.constants import OS_LINUX
+from package_manager.constants import CACHE_POLICY_CLEANUP, OS_LINUX
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,7 @@ class DownloadDefaults:
     signature_suffix: str = ".p7s"
     timeout_seconds: int = 300
     retry: int = 3
+    cache_policy: str = CACHE_POLICY_CLEANUP
 
 
 @dataclass(frozen=True)

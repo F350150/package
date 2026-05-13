@@ -4,7 +4,7 @@ title 下载器流程与异常分支（downloader.py）
 
 ' 说明：
 ' 该流程仅在“本地文件缺失或空文件”时触发。
-' 本地命中分支在 installers.ensure_local_or_download 中处理。
+' 本地命中分支在 installer/utils.ensure_local_or_download 中处理。
 
 start
 :download_file(url,destination,timeout,retry);
@@ -27,7 +27,13 @@ endif
 :attempts = max(1,retry);
 
 repeat
-  :清理历史 tmp;
+  :校验 tmp 是否可续传;
+  if (tmp 存在且 0<size<=remote_size?) then (yes)
+    :resume_from = tmp_size;
+  else (no)
+    :清理不可用 tmp;
+    :resume_from = 0;
+  endif
   :建立 TLS 上下文;
   if (TLS_INSECURE=1?) then (yes)
     :禁用证书校验并告警;
@@ -36,7 +42,17 @@ repeat
     :加载 TLS_CA_FILE_ENV (若配置);
   endif
 
-  :urlopen + 流式写入 tmp;
+  if (resume_from > 0?) then (yes)
+    :带 Range 请求下载;
+    if (服务端返回 206?) then (yes)
+      :追加写入 tmp;
+    else (no)
+      :降级全量下载(清理 tmp 后重下);
+    endif
+  else (no)
+    :全量下载;
+  endif
+  :流式写入 tmp;
   if (下载流异常?) then (yes)
     :记录失败 attempt;
     :清理 tmp;

@@ -13,7 +13,13 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from package_manager.constants import OS_LINUX, PKG_FMT_RPM, PKG_FMT_TAR_GZ
+from package_manager.constants import (
+    CACHE_POLICY_CLEANUP,
+    OS_LINUX,
+    PKG_FMT_RPM,
+    PKG_FMT_TAR_GZ,
+    SUPPORTED_CACHE_POLICIES,
+)
 from package_manager.errors import ConfigError
 from package_manager.models import DownloadDefaults, PackageConfig, VerifyDefaults
 from package_manager.paths import runtime_config_path
@@ -37,6 +43,7 @@ class DownloadDefaultsNode(BaseModel):
     signature_suffix: str = ".p7s"
     timeout_seconds: int = 300
     retry: int = 3
+    cache_policy: str = CACHE_POLICY_CLEANUP
 
     @field_validator("base_url", "signature_suffix", mode="before")
     @classmethod
@@ -45,6 +52,13 @@ class DownloadDefaultsNode(BaseModel):
         if not text:
             raise ValueError("must not be empty")
         return text
+
+    @field_validator("cache_policy")
+    @classmethod
+    def _valid_cache_policy(cls, value: str) -> str:
+        if value not in SUPPORTED_CACHE_POLICIES:
+            raise ValueError(f"must be one of {sorted(SUPPORTED_CACHE_POLICIES)}")
+        return value
 
 
 class VerifyDefaultsNode(BaseModel):
@@ -197,6 +211,7 @@ def _load_runtime_config() -> RuntimeConfig:
             signature_suffix=node.download_defaults.signature_suffix,
             timeout_seconds=node.download_defaults.timeout_seconds,
             retry=node.download_defaults.retry,
+            cache_policy=node.download_defaults.cache_policy,
         ),
         verify_defaults=VerifyDefaults(
             signature_type=node.verify_defaults.signature_type,

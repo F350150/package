@@ -7,15 +7,19 @@ from package_manager.errors import DownloadError
 
 
 class FakeResponse(io.BytesIO):
-    def __init__(self, data: bytes, headers=None):
+    def __init__(self, data: bytes, headers=None, status: int = 200):
         super().__init__(data)
         self.headers = headers or {}
+        self.status = status
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, tb):
         return False
+
+    def getcode(self):
+        return self.status
 
 
 def test_download_success(monkeypatch, tmp_path):
@@ -142,3 +146,47 @@ def test_build_ssl_context_supports_insecure_mode(monkeypatch):
     from package_manager.downloader import build_ssl_context
 
     assert build_ssl_context() is sentinel
+
+
+def test_download_resume_with_http_range(monkeypatch, tmp_path):
+    dest = tmp_path / "a.bin"
+    tmp_file = tmp_path / "a.bin.tmp"
+    tmp_file.write_bytes(b"hello")
+    seen_ranges = []
+
+    def fake_open_url(req_or_url, timeout_seconds, ssl_verify=False):
+        assert timeout_seconds == 5
+        if hasattr(req_or_url, "get_method") and req_or_url.get_method() == "HEAD":
+            return FakeResponse(b"", headers={"Content-Length": "10"})
+        if hasattr(req_or_url, "headers"):
+            seen_ranges.append(req_or_url.headers.get("Range", ""))
+            return FakeResponse(b"world", headers={"Content-Length": "5"}, status=206)
+        return FakeResponse(b"helloworld", headers={"Content-Length": "10"})
+
+    monkeypatch.setattr("package_manager.downloader.open_url", fake_open_url)
+    download_file("http://x/a.bin", dest, timeout_seconds=5, retry=1)
+
+    assert dest.read_bytes() == b"helloworld"
+    assert seen_ranges == ["bytes=5-"]
+    assert not tmp_file.exists()
+
+
+def test_download_resume_fallback_to_full_when_range_not_supported(monkeypatch, tmp_path):
+    dest = tmp_path / "a.bin"
+    tmp_file = tmp_path / "a.bin.tmp"
+    tmp_file.write_bytes(b"hello")
+
+    def fake_open_url(req_or_url, timeout_seconds, ssl_verify=False):
+        assert timeout_seconds == 5
+        if hasattr(req_or_url, "get_method") and req_or_url.get_method() == "HEAD":
+            return FakeResponse(b"", headers={"Content-Length": "10"})
+        if hasattr(req_or_url, "headers"):
+            # 服务端忽略 Range，返回 200 全量
+            return FakeResponse(b"helloworld", headers={"Content-Length": "10"}, status=200)
+        return FakeResponse(b"helloworld", headers={"Content-Length": "10"}, status=200)
+
+    monkeypatch.setattr("package_manager.downloader.open_url", fake_open_url)
+    download_file("http://x/a.bin", dest, timeout_seconds=5, retry=1)
+
+    assert dest.read_bytes() == b"helloworld"
+    assert not tmp_file.exists()

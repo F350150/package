@@ -92,6 +92,12 @@ package "配置与模型" {
     +get_installed_version(product, path=None) -> Optional[str]
     +update_install_state(product, version, package_format, path=None) -> None
   }
+
+  class "file_lock <<module>>" as LockModule {
+    +FileLock(lock_path, timeout, poll_interval, stale_lock_ttl_seconds)
+    -_cleanup_stale_lock_if_needed() -> None
+    -_is_stale_lock(meta) -> Tuple[bool,str]
+  }
 }
 
 package "解析、下载、验签" {
@@ -107,6 +113,7 @@ package "解析、下载、验签" {
     +get_remote_file_size(url, timeout_seconds, ssl_verify=False) -> Optional[int]
     +ensure_disk_space(destination, expected_size) -> None
     +do_download_with_retry(...) -> None
+    +open_download_stream(url, timeout_seconds, ssl_verify, resume_from, tmp_path)
   }
 
   class "verifier <<module>>" as VerifierModule {
@@ -173,8 +180,13 @@ package "安装器" {
     -_framework_signature_path() -> Path
   }
 
-  class "installers <<module>>" as InstallersModule {
+  class "installer.registry <<module>>" as InstallersModule {
     +get_installer_class(config) -> Type[BaseInstaller]
+    +discover_installer_plugins() -> Dict[InstallerKey, Type[BaseInstaller]]
+    +installer_registry(reload=False) -> Dict[InstallerKey, Type[BaseInstaller]]
+  }
+
+  class "installer.utils <<module>>" as InstallerUtilsModule {
     +ensure_local_or_download(url, destination, timeout_seconds, retry) -> None
     +resolve_install_dir(resolved) -> Path
     +install_porting_advisor_runtime_layout(payload_dir, install_dir) -> None
@@ -227,9 +239,11 @@ BaseInstaller o-- ResolvedPackage
 BaseInstaller o-- DownloadDefaults
 BaseInstaller o-- VerifyDefaults
 BaseInstaller ..> StateModule : 读写安装状态
+StateModule ..> LockModule : 加锁/陈旧锁清理
 BaseInstaller ..> VerifierModule : 验签
 BaseInstaller ..> PathsModule : 根证书/目录
 BaseInstaller ..> DownloaderModule : 下载
+BaseInstaller ..> InstallerUtilsModule : 离线优先
 BaseInstaller ..> PreCheckResult
 
 TarGzInstaller --|> BaseInstaller

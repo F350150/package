@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 package-installer = "package_manager.main:main"
+package-mcp-server = "package_manager.mcp_server:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

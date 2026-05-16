@@ -1,80 +1,67 @@
 # package-manager
 
-YAML 配置、自动下载、P7S 验签、通过后安装的工具包管理器。
+YAML 配置、自动下载、P7S 验签、安装执行的包管理器，支持通过 MCP 暴露为远端可调用能力。
 
-## 核心特点
-- 配置外置到 YAML（`config/packages.yaml`），支持独立更新版本与下载地址
-- 版本语义拆分：`project_version`（项目版本）与 `artifact_version`（包自身版本）
-- 运行时自动识别架构并推导包名
-- 离线优先安装：本地包命中直接安装，缺失时自动下载，下载失败给出离线投放路径提示
-- 下载前远端大小探测 + 磁盘空间预检查
-- `.tmp` 原子下载与重试
-- `openssl cms -verify` 做 detached `.p7s` 验签
+## 核心能力
+- 安装器主链路：配置加载 -> 选包 -> 下载/离线命中 -> 验签 -> 安装 -> 状态落盘
+- 双版本语义：`project_version`（目录/状态）与 `artifact_version`（文件名）
+- 离线优先：本地包命中直接安装，缺失时在线补齐，失败时返回离线投放提示
+- 下载可靠性：磁盘预检、重试、`.tmp` 原子替换、Range 续传
+- 验签安全：`openssl cms -verify` detached `.p7s`
 - 安装器分层：`BaseInstaller -> TarGzInstaller/RpmInstaller -> 产品子类`
-- 安装状态落盘到隐藏文件 `.package-manager/.install_state.yaml`
-- `_internal` 目录分离打包依赖
-- 安装路径可在配置中按产品独立指定（`install_dir`）
+- MCP 控制面：`pm_health/pm_list_packages/pm_status/pm_install/pm_skill_install_guarded`
+- MCP 鉴权与授权：静态 token + HMAC 短期 token，`pm:read/pm:write` scope 控制
+- 控制面并发保护：安装互斥锁、命令超时与结构化错误码
 
-## 项目结构
-- `config/packages.yaml`：外置配置（下载参数、包定义、支持版本）
-- `src/package_manager/config.py`：YAML 配置加载器
-- `src/package_manager/install_state.py`：隐藏状态文件读写
-- `src/package_manager/models.py`：数据模型
-- `src/package_manager/errors.py`：错误与退出码
-- `src/package_manager/paths.py`：路径管理
-- `src/package_manager/resolver.py`：配置解析与文件名推导
-- `src/package_manager/downloader.py`：下载与空间校验
-- `src/package_manager/verifier.py`：OpenSSL 验签
-- `src/package_manager/installers.py`：安装器层与注册表
-- `src/package_manager/service.py`：业务编排入口
-- `src/package_manager/main.py`：CLI 入口
+## 目录结构
+- `src/package_manager/main.py`：CLI 入口（支持 `--dry-run`）
+- `src/package_manager/service.py`：安装编排
+- `src/package_manager/installer/`：安装器实现与注册
+- `src/package_manager/control_plane.py`：MCP 控制面适配
+- `src/package_manager/mcp_server.py`：MCP Server 与鉴权
+- `scripts/start_mcp_server.sh`：MCP 启动脚本
+- `scripts/generate_mcp_token.py`：HMAC 短期 token 生成
+- `.opencode/skills/package-manager-install-guarded/SKILL.md`：Skill 规范
 
-## CLI
+## CLI 用法
 ```bash
 python -m package_manager.main --name DevKit-Porting-Advisor
+python -m package_manager.main --name DevKit-Porting-Advisor --dry-run
 python -m package_manager.main --name devkit-porting
 ```
 
-## 一键构建
+## MCP 用法（本地快速联调）
 ```bash
-./scripts/build.sh 26.0.RC1
+export PACKAGE_MANAGER_MCP_HOST=127.0.0.1
+export PACKAGE_MANAGER_MCP_PORT=18880
+export PACKAGE_MANAGER_MCP_PATH=/mcp
+export PACKAGE_MANAGER_MCP_AUTH_DISABLED=true
+./scripts/start_mcp_server.sh
 ```
 
-## 一键构建并运行（Quick Start）
+## 远端 MCP 建议（最小可用）
 ```bash
-./scripts/quick_start.sh
+export PACKAGE_MANAGER_MCP_HOST=0.0.0.0
+export PACKAGE_MANAGER_MCP_PORT=18800
+export PACKAGE_MANAGER_MCP_PATH=/mcp
+
+# 二选一或同时启用
+export PACKAGE_MANAGER_MCP_TOKEN='replace-with-long-random-token'
+export PACKAGE_MANAGER_MCP_TOKEN_SCOPES='pm:read,pm:write'
+# export PACKAGE_MANAGER_MCP_HMAC_SECRET='replace-with-hmac-secret'
+
+./scripts/start_mcp_server.sh
 ```
 
-在已有容器中执行完整测试流程：
+## 测试
 ```bash
-./scripts/quick_start.sh --container openeuler-arm --test-porting-installers
+pytest -q
+pytest tests/test_mcp_server_auth.py -q
+pytest tests/test_mcp_server_e2e.py -q
 ```
 
-执行完整端到端场景（S01-S16、S18-S29，默认跳过 S17）：
-```bash
-./scripts/e2e_cases.sh --container openeuler-arm
-```
-
-说明：
-- `quick_start.sh` 不会使用 `sudo`。
-- 安装路径由 `config/packages.yaml` 中每个包的 `install_dir` 控制。
-- 容器模式会把当前项目复制到容器临时目录后执行同一脚本；默认自动安装 `pytest`、`pyinstaller`、`pyyaml`（可用 `--container-no-bootstrap` 关闭）。
-- `e2e_cases.sh` 会输出场景级返回码与日志目录，便于回归对比与问题定位。
-- `e2e_cases.sh` 已包含离线安装新特性分支场景（本地命中、缺失补齐、不可下载提示、空文件分支、framework 分支）。
-
-构建脚本会自动：
-- 用 `config/packages.template.yaml` 渲染构建产物配置 `dist/package-manager/config/packages.yaml`
-- 从 `pems/huawei_integrity_root_ca_g2.der` 生成 PEM
-- 复制 `openssl` 到 `_internal/openssl/bin/openssl`
-- 复制 PEM 到 `_internal/openssl/pems/`
-- 生成 `dist/package-manager/package-manager`
-- 将依赖同步到产物目录的 `_internal`
-
-## 开发者文档
-详见：[开发者文档](/Users/fxl/pycharm_projects/package/docs/DEVELOPER_GUIDE.md)
-
-详细设计文档（含 PUML 图）：
+## 文档索引
 - [架构详细设计](/Users/fxl/pycharm_projects/package/docs/ARCHITECTURE_DESIGN.md)
-
-测试文档（UT/E2E 用例设计与执行）：
+- [开发者指南](/Users/fxl/pycharm_projects/package/docs/DEVELOPER_GUIDE.md)
 - [测试指南](/Users/fxl/pycharm_projects/package/docs/TESTING_GUIDE.md)
+- [远端 MCP 操作指南](/Users/fxl/pycharm_projects/package/docs/REMOTE_MCP_OPERATION_GUIDE.md)

@@ -8,6 +8,7 @@
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import yaml
@@ -182,6 +183,12 @@ def _load_raw_config() -> Dict[str, Any]:
     """读取并解析 YAML 原始结构。"""
 
     path = runtime_config_path()
+    return load_raw_config_from_path(path)
+
+
+def load_raw_config_from_path(path: Path) -> Dict[str, Any]:
+    """从指定路径读取并解析 YAML 原始结构。"""
+
     if not path.exists():
         raise ConfigError(f"Config file does not exist: {path}")
     try:
@@ -200,6 +207,12 @@ def _load_runtime_config() -> RuntimeConfig:
     """加载并构建运行时配置对象。"""
 
     raw = _load_raw_config()
+    return runtime_config_from_raw(raw)
+
+
+def runtime_config_from_raw(raw: Dict[str, Any]) -> RuntimeConfig:
+    """从 YAML 字典构建运行时配置对象。"""
+
     try:
         node = ConfigNode.model_validate(raw)
     except ValidationError as exc:
@@ -234,6 +247,13 @@ def _load_runtime_config() -> RuntimeConfig:
             for item in node.packages
         ],
     )
+
+
+def load_runtime_config_from_path(path: Path) -> RuntimeConfig:
+    """从指定配置路径加载运行时配置（不使用全局缓存）。"""
+
+    raw = load_raw_config_from_path(path)
+    return runtime_config_from_raw(raw)
 
 
 def get_runtime_config(reload: bool = False) -> RuntimeConfig:

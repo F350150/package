@@ -1,0 +1,40 @@
+@startuml
+!pragma layout smetana
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+
+title package-manager 远端 MCP 部署视图
+
+node "Local PC" {
+  [opencode\nmodel: alibaba-cn/glm-5] as OpenCode
+  [Skill\npackage-manager-install-guarded] as Skill
+}
+
+cloud "Network" {
+  [HTTP(S) /mcp] as Net
+}
+
+node "Remote Host / Container" {
+  [package_manager.mcp_server\n(FastMCP streamable-http)] as MCP
+  [Auth Layer\nStatic Token / HMAC Token\nScope: pm:read, pm:write] as Auth
+  [control_plane.py\nwhitelist tools] as CP
+  [install lock\n.mcp_install.lock] as Lock
+  [package-manager binary] as Bin
+  database "install_state\n.package-manager/.install_state.yaml" as State
+  database "config/packages.yaml" as Cfg
+}
+
+OpenCode --> Skill : 自然语言触发
+Skill --> OpenCode : 生成工具调用计划
+OpenCode --> Net : call pm_* tools
+Net --> MCP
+MCP --> Auth : verify token + scopes
+Auth --> CP : allow/reject
+CP --> Cfg : read runtime config
+CP --> Lock : acquire/release
+CP --> Bin : run --name/--dry-run
+Bin --> State : update install state
+CP --> MCP : structured result
+MCP --> OpenCode : tool response
+
+@enduml

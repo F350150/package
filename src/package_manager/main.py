@@ -12,6 +12,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description="Package installer with built-in config and P7S verification")
     parser.add_argument("--name", required=True, help="按产品名安装")
+    parser.add_argument("--dry-run", action="store_true", help="仅执行预检流程，不落地安装")
     parser.add_argument("--verbose", action="store_true", help="预留参数，当前仅保持兼容")
     return parser.parse_args(argv)
 
@@ -24,7 +25,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # 延迟导入，确保配置加载异常能被统一错误处理捕获。
         from package_manager.service import run_with_builtin_config
 
-        return run_with_builtin_config(name=args.name)
+        return run_with_builtin_config(name=args.name, dry_run=args.dry_run)
     except InstallerError as exc:
         print(f"Installer error: {exc}")
         return exc.exit_code

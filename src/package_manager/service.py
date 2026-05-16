@@ -15,12 +15,12 @@ from package_manager.models import PackageConfig
 from package_manager.resolver import resolve_package
 
 
-def run_with_builtin_config(name: Optional[str] = None) -> int:
+def run_with_builtin_config(name: Optional[str] = None, dry_run: bool = False) -> int:
     """按 YAML 配置执行，仅支持按 name 安装。"""
 
     runtime = get_runtime_config()
     selected = select_packages(name, runtime)
-    return run_packages(selected, runtime)
+    return run_packages(selected, runtime, dry_run=dry_run)
 
 
 def enabled_packages(packages: Iterable[PackageConfig]) -> List[PackageConfig]:
@@ -56,12 +56,15 @@ def normalize_required_value(value: str, label: str) -> str:
     raise ConfigError(f"{label} must not be empty")
 
 
-def run_packages(packages: Iterable[PackageConfig], runtime: RuntimeConfig) -> int:
-    """执行安装。"""
+def run_packages(packages: Iterable[PackageConfig], runtime: RuntimeConfig, dry_run: bool = False) -> int:
+    """执行安装或预检。"""
 
     for pkg in packages:
         resolved = resolve_package(pkg, runtime.download_defaults)
         installer_cls = get_installer_class(pkg)
         installer = installer_cls(resolved, runtime.download_defaults, runtime.verify_defaults)
+        if dry_run:
+            installer.run_dry_run()
+            continue
         installer.run()
     return 0

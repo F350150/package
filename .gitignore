@@ -24,3 +24,7 @@ _internel/
 .venv/
 venv/
 .package-manager/
+
+# opencode local artifacts
+opencode.json
+.opencode/node_modules/

@@ -72,6 +72,31 @@ class BaseInstaller(ABC):
             self.cleanup_temp_safely()
             raise InstallError(f"Unhandled installer exception: {exc}") from exc
 
+    def run_dry_run(self) -> None:
+        """执行可验证的预检流程，不执行安装写入。"""
+
+        print(f"Installer dry-run started: {self._log_identity()}")
+        installed_version = self.recorded_installed_version()
+        precheck = self.pre_check(installed_version)
+        if not precheck.should_install:
+            reason = precheck.reason or "already installed"
+            print(f"Installer dry-run pre-check hit: {self._log_identity()}, reason={reason}")
+            return
+        try:
+            self.prepare()
+            self.download()
+            self.verify_signature()
+            self.pre_install()
+            print(f"Installer dry-run completed: {self._log_identity()}")
+        except InstallerError:
+            print(f"Installer dry-run failed: {self._log_identity()}")
+            self.cleanup_temp_safely()
+            raise
+        except Exception as exc:
+            print(f"Installer dry-run failed: {self._log_identity()}")
+            self.cleanup_temp_safely()
+            raise InstallError(f"Unhandled installer dry-run exception: {exc}") from exc
+
     def recorded_installed_version(self) -> Optional[str]:
         return get_installed_version(self.resolved.config.product)
 

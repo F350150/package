@@ -13,10 +13,10 @@ package "入口与编排" {
   }
 
   class "service <<module>>" as ServiceModule {
-    +run_with_builtin_config(name) -> int
+    +run_with_builtin_config(name, dry_run=False) -> int
     +select_packages(name, runtime) -> List[PackageConfig]
     +get_packages_by_name(name, packages) -> List[PackageConfig]
-    +run_packages(packages, runtime) -> int
+    +run_packages(packages, runtime, dry_run=False) -> int
   }
 }
 
@@ -193,6 +193,31 @@ package "安装器" {
   }
 }
 
+package "MCP 控制面" {
+  class ControlPlaneSettings {
+    +binary_path: Path
+    +config_file: Path
+    +state_file: Path
+    +lock_file: Path
+    +command_timeout_seconds: int
+    +install_lock_timeout_seconds: int
+    +dry_run_mode: str
+  }
+
+  class "control_plane <<module>>" as ControlPlaneModule {
+    +health() -> Dict[str, Any]
+    +list_packages() -> Dict[str, Any]
+    +status(product=None) -> Dict[str, Any]
+    +install(product, dry_run=False) -> Dict[str, Any]
+    +install_with_guardrails(product) -> Dict[str, Any]
+  }
+
+  class "mcp_server <<module>>" as MCPServerModule {
+    +build_server(args) -> FastMCP
+    +issue_hmac_token(secret, client_id, scopes, ttl_seconds) -> str
+  }
+}
+
 package "基础设施" {
   class "paths <<module>>" as PathsModule {
     +app_dir() -> Path
@@ -217,6 +242,11 @@ package "基础设施" {
 
 MainModule ..> ServiceModule : 调用
 MainModule ..> InstallerError : 统一异常映射
+MCPServerModule ..> ControlPlaneModule : 工具调用
+ControlPlaneModule o-- ControlPlaneSettings
+ControlPlaneModule ..> ConfigModule : 读取运行配置
+ControlPlaneModule ..> StateModule : 查询安装状态
+ControlPlaneModule ..> ServiceModule : 复用主流程约束
 
 ServiceModule ..> ConfigModule : 读取 RuntimeConfig
 ServiceModule ..> ResolverModule : 解析包

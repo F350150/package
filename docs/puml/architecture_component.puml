@@ -9,6 +9,11 @@ package "CLI 层" {
   [main.py\n参数解析/退出码映射]
 }
 
+package "MCP 控制面" {
+  [mcp_server.py\nFastMCP + 鉴权 + scope授权]
+  [control_plane.py\n工具白名单/结构化返回/安装互斥锁]
+}
+
 package "编排层" {
   [service.py\n选包/执行顺序]
 }
@@ -43,6 +48,11 @@ folder "_internal/packages" as cache
 folder "config.install_dir 指定的安装目录" as install_root
 
 [main.py\n参数解析/退出码映射] --> [service.py\n选包/执行顺序]
+[mcp_server.py\nFastMCP + 鉴权 + scope授权] --> [control_plane.py\n工具白名单/结构化返回/安装互斥锁]
+[control_plane.py\n工具白名单/结构化返回/安装互斥锁] --> [config.py\nYAML 加载/校验]
+[control_plane.py\n工具白名单/结构化返回/安装互斥锁] --> [install_state.py\n已安装状态持久化]
+[control_plane.py\n工具白名单/结构化返回/安装互斥锁] --> [service.py\n选包/执行顺序]
+[control_plane.py\n工具白名单/结构化返回/安装互斥锁] --> [errors.py\n异常与退出码]
 [service.py\n选包/执行顺序] --> [config.py\nYAML 加载/校验]
 [service.py\n选包/执行顺序] --> [resolver.py\nURL/文件名/包元信息 解析]
 [service.py\n选包/执行顺序] --> [installer/registry.py\n安装器注册与插件发现]

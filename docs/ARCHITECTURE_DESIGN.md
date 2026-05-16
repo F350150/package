@@ -739,3 +739,57 @@ stop
 | S32 | `keep_latest` 缓存策略 | cache policy | `rc=0` 且离线重装复用本地缓存 |
 | S33 | 预置陈旧锁后安装 | stale lock reclaim | `rc=0` 且陈旧锁被清理 |
 | S34 | 活锁保护 | live lock protect | `rc=0` 且竞争方超时、活锁不误删 |
+
+---
+
+## 五、MCP 控制面架构
+
+### 5.1 设计目标
+1. 让本地 `opencode` 通过自然语言调用远端包管理能力。
+2. 保持“工具白名单 + 最小权限 + 可审计返回”的控制面边界。
+3. 不改动安装器内核主流程，仅在控制面做编排与保护。
+
+### 5.2 关键组件
+| 组件 | 文件 | 作用 |
+|---|---|---|
+| MCP Server | `src/package_manager/mcp_server.py` | 暴露 `pm_*` 工具、鉴权、scope 授权 |
+| Control Plane | `src/package_manager/control_plane.py` | 工具能力实现、结构化返回、安装互斥锁 |
+| 启动脚本 | `scripts/start_mcp_server.sh` | 环境变量装配、鉴权模式选择 |
+| Token 生成 | `scripts/generate_mcp_token.py` | HMAC 短期 token 生成 |
+| Skill | `.opencode/skills/package-manager-install-guarded/SKILL.md` | 标准安装编排流程约定 |
+
+### 5.3 工具与权限模型
+| 工具名 | 动作 | 需要 scope |
+|---|---|---|
+| `pm_health` | 健康检查 | `pm:read` |
+| `pm_list_packages` | 列包 | `pm:read` |
+| `pm_status` | 状态查询 | `pm:read` |
+| `pm_install` | 安装执行 | `pm:write` |
+| `pm_skill_install_guarded` | 受控安装（health->list->dry-run->install->status） | `pm:write` |
+
+### 5.4 鉴权模型
+1. 静态 token：`PACKAGE_MANAGER_MCP_TOKEN` + `PACKAGE_MANAGER_MCP_TOKEN_SCOPES`。
+2. HMAC 短期 token：`PACKAGE_MANAGER_MCP_HMAC_SECRET`。
+3. 可组合 verifier：静态 token 与 HMAC 可同时启用。
+4. 安全兜底：`auth-disabled` 默认仅允许 loopback host。
+
+### 5.5 控制面保护机制
+1. 安装互斥锁：`PACKAGE_MANAGER_INSTALL_LOCK_FILE` + `PACKAGE_MANAGER_INSTALL_LOCK_TIMEOUT_SECONDS`。
+2. 命令超时：`PACKAGE_MANAGER_COMMAND_TIMEOUT_SECONDS`。
+3. dry-run 模式：
+   1. `command`：实际调用 `package-manager --dry-run`。
+   2. `simulate`：仅模拟成功，适配老二进制。
+4. 错误结构化：`lock_timeout/command_timeout/command_exec_error/command_failed`。
+
+### 5.6 部署与时序图
+- 远端部署视图：
+  - [mcp_remote_deployment_view.puml](/Users/fxl/pycharm_projects/package/docs/puml/mcp_remote_deployment_view.puml)
+- 受控安装时序图：
+  - [mcp_guarded_install_sequence.puml](/Users/fxl/pycharm_projects/package/docs/puml/mcp_guarded_install_sequence.puml)
+
+### 5.7 MCP 测试覆盖
+| 测试文件 | 覆盖点 |
+|---|---|
+| `tests/test_control_plane.py` | 工具能力、安装锁、dry-run、超时错误 |
+| `tests/test_mcp_server_auth.py` | 静态 token/HMAC token/组合 verifier/scope 安全策略 |
+| `tests/test_mcp_server_e2e.py` | streamable-http 协议级端到端工具调用 |

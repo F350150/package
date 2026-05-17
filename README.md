@@ -65,3 +65,4 @@ pytest tests/test_mcp_server_e2e.py -q
 - [开发者指南](/Users/fxl/pycharm_projects/package/docs/DEVELOPER_GUIDE.md)
 - [测试指南](/Users/fxl/pycharm_projects/package/docs/TESTING_GUIDE.md)
 - [远端 MCP 操作指南](/Users/fxl/pycharm_projects/package/docs/REMOTE_MCP_OPERATION_GUIDE.md)
+- [Local MCP Bridge 手工验收指南](/Users/fxl/pycharm_projects/package/docs/LOCAL_MCP_BRIDGE_MANUAL_TEST_GUIDE.md)

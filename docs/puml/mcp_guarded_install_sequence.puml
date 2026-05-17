@@ -11,35 +11,35 @@ participant "PackageManagerControlPlane" as CP
 participant "package-manager binary" as BIN
 participant "install_state" as STATE
 
-User -> OC: “安装 DevKit-Porting-Advisor，先 dry-run，再真实安装”
+User -> OC: 安装 DevKit-Porting-Advisor，先 dry-run，再真实安装
 OC -> SK: 触发 skill
 SK -> TOOL: call(product)
 TOOL -> CP: install_with_guardrails(product)
 
 CP -> CP: health()
-alt unhealthy
+
+break unhealthy
   CP --> TOOL: error(phase=health)
   TOOL --> OC: fail
-  stop
 end
 
 CP -> CP: list_packages()
 CP -> CP: validate_product()
-alt unknown/disabled
+
+break unknown/disabled
   CP --> TOOL: error(phase=validate_product)
   TOOL --> OC: fail
-  stop
 end
 
 CP -> CP: install(dry_run=true)
-alt dry_run fail
+
+break dry_run fail
   CP --> TOOL: error(phase=dry_run)
   TOOL --> OC: fail
-  stop
 end
 
 CP -> CP: acquire install lock
-CP -> BIN: run --name <product>
+CP -> BIN: run --name &lt;product&gt;
 BIN -> STATE: write installed_version/last_result
 CP -> CP: release install lock
 CP -> CP: status(product)

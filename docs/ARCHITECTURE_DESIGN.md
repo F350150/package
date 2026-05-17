@@ -436,6 +436,7 @@ stop
 title 离线优先决策流程（ensure_local_or_download）
 
 start
+
 :输入 url + destination;
 
 if (destination 存在且是文件?) then (yes)
@@ -450,17 +451,13 @@ else (no)
 endif
 
 :调用 downloader.download_file(...);
+
 if (下载成功?) then (yes)
   :返回;
   stop
 else (no)
   :包装 DownloadError;
-  :附加离线提示：
-  note right
-    Offline install hint:
-    place file at <destination>
-    and rerun.
-  end note
+  :附加离线提示\nOffline install hint:\nplace file at &lt;destination&gt;\nand rerun.;
   :抛出 DownloadError(20);
   stop
 endif

@@ -135,6 +135,9 @@ opencode mcp list
 2. `binary-path` 指向本地 wrapper（wrapper 内转发到远端执行）。
 3. `config-file/state-file` 使用远端同步或镜像文件。
 
+完整手动验收步骤（逐步预期与验证口径）见：
+- [LOCAL_MCP_BRIDGE_MANUAL_TEST_GUIDE.md](/Users/fxl/pycharm_projects/package/docs/LOCAL_MCP_BRIDGE_MANUAL_TEST_GUIDE.md)
+
 示例启动：
 ```bash
 PYTHONPATH=src \

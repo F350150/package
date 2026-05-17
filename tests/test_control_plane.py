@@ -97,6 +97,13 @@ def _control_plane(tmp_path: Path) -> PackageManagerControlPlane:
         state_file=state,
         command_timeout_seconds=120,
         lock_file=tmp_path / ".package-manager" / ".mcp_install.lock",
+        config_lock_file=tmp_path / ".package-manager" / ".mcp_config.lock",
+        uninstall_lock_file=tmp_path / ".package-manager" / ".mcp_uninstall.lock",
+        confirm_lock_file=tmp_path / ".package-manager" / ".mcp_confirm.lock",
+        confirm_used_file=tmp_path / ".package-manager" / ".mcp_confirm_used.json",
+        idempotency_file=tmp_path / ".package-manager" / ".mcp_idempotency.json",
+        audit_file=tmp_path / ".package-manager" / "audit.log",
+        config_backup_dir=tmp_path / ".package-manager" / "config-backups",
     )
     return PackageManagerControlPlane(settings=settings)
 
@@ -155,6 +162,47 @@ def test_install_with_guardrails_success(tmp_path: Path):
     phases = result["phases"]
     assert phases["health"]["healthy"] is True
     assert phases["dry_run"]["status"] == "success"
+    assert phases["install"]["status"] == "success"
+
+
+def test_install_with_guardrails_fallback_when_dry_run_flag_not_supported(tmp_path: Path):
+    config = tmp_path / "packages.yaml"
+    state = tmp_path / ".package-manager" / ".install_state.yaml"
+    binary = tmp_path / "package-manager"
+    _write_config(config)
+    _write_state(state)
+    binary.write_text(
+        """#!/usr/bin/env python3
+import sys
+if "--help" in sys.argv:
+    print("usage: package-manager --name <product>")
+    raise SystemExit(0)
+if "--dry-run" in sys.argv:
+    print("package-manager: error: unrecognized arguments: --dry-run", file=sys.stderr)
+    raise SystemExit(2)
+print("Installer run completed: demo-product")
+raise SystemExit(0)
+""",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+
+    cp = PackageManagerControlPlane(
+        settings=ControlPlaneSettings(
+            binary_path=binary,
+            config_file=config,
+            state_file=state,
+            command_timeout_seconds=120,
+            lock_file=tmp_path / ".package-manager" / ".mcp_install.lock",
+            dry_run_mode="command",
+        )
+    )
+
+    result = cp.install_with_guardrails("demo-product")
+    assert result["status"] == "success"
+    phases = result["phases"]
+    assert phases["dry_run"]["status"] == "success"
+    assert phases["dry_run"]["dry_run_mode"] == "simulate_fallback"
     assert phases["install"]["status"] == "success"
 
 
@@ -219,3 +267,111 @@ raise SystemExit(0)
     result = cp.install("demo-product", dry_run=False)
     assert result["status"] == "error"
     assert result["error_code"] == "command_timeout"
+
+
+def test_get_config_supports_path_and_product(tmp_path: Path):
+    cp = _control_plane(tmp_path)
+    by_path = cp.get_config(path="download_defaults.base_url")
+    assert by_path["status"] == "success"
+    assert by_path["value"] == "https://example.com/demo/"
+    by_product = cp.get_config(product="demo-product")
+    assert by_product["status"] == "success"
+    assert by_product["value"]["artifact_version"] == "1.0.1"
+
+
+def test_update_config_plan_confirm_apply_and_rollback(tmp_path: Path):
+    cp = _control_plane(tmp_path)
+    plan = cp.update_config_plan(
+        operations=[{"op": "set", "path": "packages[demo-product].enabled", "value": False}],
+        actor="tester",
+        reason="disable for maintenance",
+    )
+    assert plan["status"] == "success"
+    plan_id = plan["plan_id"]
+    confirm = cp.confirm_plan(plan_id=plan_id, actor="tester")
+    assert confirm["status"] == "success"
+    apply_result = cp.update_config_apply(
+        plan_id=plan_id,
+        challenge_token=confirm["challenge_token"],
+        request_id="req-config-apply-1",
+        idempotency_key="idem-config-1",
+        actor="tester",
+    )
+    assert apply_result["status"] == "success"
+    assert apply_result["config_backup_version"].startswith("config-")
+
+    read_back = cp.get_config(path="packages[demo-product].enabled")
+    assert read_back["value"] is False
+
+    rollback = cp.rollback_config(
+        version_id=apply_result["config_backup_version"],
+        request_id="req-config-rollback-1",
+        idempotency_key="idem-config-rollback-1",
+        actor="tester",
+    )
+    assert rollback["status"] == "success"
+    restored = cp.get_config(path="packages[demo-product].enabled")
+    assert restored["value"] is True
+
+
+def test_update_config_allows_project_version_when_supported_versions_match(tmp_path: Path):
+    cp = _control_plane(tmp_path)
+    plan = cp.update_config_plan(
+        operations=[
+            {"op": "set", "path": "packages[demo-product].project_version", "value": "1.0.1"},
+            {"op": "set", "path": "packages[demo-product].supported_versions", "value": ["1.0.0", "1.0.1"]},
+        ],
+        actor="tester",
+    )
+    assert plan["status"] == "success"
+
+
+def test_confirm_token_replay_is_blocked(tmp_path: Path):
+    cp = _control_plane(tmp_path)
+    plan = cp.update_config_plan(
+        operations=[{"op": "set", "path": "download_defaults.retry", "value": 5}],
+        actor="tester",
+    )
+    confirm = cp.confirm_plan(plan_id=plan["plan_id"], actor="tester")
+    first = cp.update_config_apply(
+        plan_id=plan["plan_id"],
+        challenge_token=confirm["challenge_token"],
+        request_id="req-replay-1",
+        idempotency_key="idem-replay-1",
+        actor="tester",
+    )
+    assert first["status"] == "success"
+    second = cp.update_config_apply(
+        plan_id=plan["plan_id"],
+        challenge_token=confirm["challenge_token"],
+        request_id="req-replay-2",
+        idempotency_key="idem-replay-2",
+        actor="tester",
+    )
+    assert second["status"] == "error"
+    assert second["error_code"] == "confirm_replayed"
+
+
+def test_uninstall_plan_confirm_apply(tmp_path: Path):
+    cp = _control_plane(tmp_path)
+    install_root = cp.settings.binary_path.parent
+    target_dir = install_root / "_internal" / "demo"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "payload.txt").write_text("ok", encoding="utf-8")
+
+    plan = cp.uninstall_plan(product="demo-product", actor="tester")
+    assert plan["status"] == "success"
+    assert plan["plan"]["target_path_exists"] is True
+    confirm = cp.confirm_plan(plan_id=plan["plan_id"], actor="tester")
+    assert confirm["status"] == "success"
+    applied = cp.uninstall_apply(
+        plan_id=plan["plan_id"],
+        challenge_token=confirm["challenge_token"],
+        request_id="req-uninstall-1",
+        idempotency_key="idem-uninstall-1",
+        actor="tester",
+    )
+    assert applied["status"] == "success"
+    assert not target_dir.exists()
+    status = cp.status(product="demo-product")
+    assert status["state"] is None

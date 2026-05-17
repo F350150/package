@@ -5,6 +5,8 @@ from package_manager.mcp_server import (
     HmacBearerTokenVerifier,
     StaticBearerTokenVerifier,
     build_server,
+    default_public_base_url,
+    fastmcp_supports,
     issue_hmac_token,
     normalize_scopes,
     parse_args,
@@ -68,6 +70,11 @@ def test_normalize_scopes():
     assert normalize_scopes("pm:read,pm:write,pm:read") == ["pm:read", "pm:write"]
 
 
+def test_default_public_base_url_for_wildcard_host():
+    assert default_public_base_url("0.0.0.0", 18800) == "http://127.0.0.1:18800"
+    assert default_public_base_url("::", 18800) == "http://127.0.0.1:18800"
+
+
 def test_auth_disabled_nonlocal_is_blocked():
     args = parse_args(["--host", "0.0.0.0", "--auth-disabled"])
     try:
@@ -76,3 +83,24 @@ def test_auth_disabled_nonlocal_is_blocked():
         assert "auth-disabled on non-loopback host" in str(exc)
         return
     raise AssertionError("expected ValueError for non-loopback auth-disabled server")
+
+
+def test_auth_enabled_with_token_builds_server():
+    args = parse_args(
+        [
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18800",
+            "--token",
+            "demo-token",
+            "--token-scopes",
+            "pm:read,pm:write",
+        ]
+    )
+    server = build_server(args)
+    assert server is not None
+
+
+def test_fastmcp_supports_inspection():
+    assert isinstance(fastmcp_supports("host"), bool)

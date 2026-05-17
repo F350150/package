@@ -93,6 +93,13 @@ async def _exercise_mcp(url: str) -> None:
                 "pm_status",
                 "pm_install",
                 "pm_skill_install_guarded",
+                "pm_get_config",
+                "pm_update_config_plan",
+                "pm_update_config_apply",
+                "pm_uninstall_plan",
+                "pm_uninstall_apply",
+                "pm_confirm_plan",
+                "pm_rollback_config",
             }.issubset(names)
 
             list_result = await session.call_tool("pm_list_packages", {})

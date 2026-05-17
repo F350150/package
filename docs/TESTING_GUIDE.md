@@ -3,76 +3,92 @@
 ## 1. 目标与范围
 1. 安装主链路行为稳定（成功、跳过、失败、回滚、状态更新）。
 2. MCP 控制面行为稳定（工具可用、鉴权授权、结构化返回）。
-3. `opencode -> MCP -> package-manager` 端到端可手工验收。
+3. `opencode -> MCP -> package-manager` 端到端链路可手工验收。
 
-## 2. 自动化测试分层
-### 2.1 安装器与基础能力
-- 覆盖配置、解析、下载、验签、安装器模板、状态锁。
-- 命令：
+## 2. 自动化测试
+
+### 2.1 全量回归
 ```bash
 pytest -q
 ```
 
-### 2.2 MCP 控制面与鉴权
-- `tests/test_control_plane.py`：
-  - `pm_health/pm_list_packages/pm_status/pm_install`
-  - dry-run 模式
-  - 安装锁超时
-  - 命令超时
-- `tests/test_mcp_server_auth.py`：
-  - 静态 token
-  - HMAC token（过期/签名）
-  - 组合 verifier
-  - `auth-disabled` 非 loopback 拦截
-- `tests/test_mcp_server_e2e.py`：
-  - MCP streamable-http 协议级工具调用
-
-命令：
+### 2.2 MCP 专项
 ```bash
 pytest tests/test_control_plane.py -q
 pytest tests/test_mcp_server_auth.py -q
 pytest tests/test_mcp_server_e2e.py -q
 ```
 
-## 3. 手工验收（opencode 全链路）
+覆盖点：
+1. 控制面工具行为（health/list/status/install）。
+2. dry-run 与安装互斥锁。
+3. 命令超时与结构化错误。
+4. 静态 token / HMAC token / scope 授权。
+5. streamable-http 协议级调用。
+6. 危险操作五阶段：plan -> confirm -> apply -> verify -> audit。
+7. challenge token 过期/重放防护、幂等键复用行为、配置回滚。
 
-### 3.1 前置
-1. `opencode mcp list` 中 `package-manager-remote` 为 `connected`。
-2. 远端 MCP Server 已启动并可访问。
-3. 若远端 `package-manager` 不支持 `--dry-run`，设置 `PACKAGE_MANAGER_MCP_DRY_RUN_MODE=simulate`。
+## 3. 手工测试入口
 
-### 3.2 验收步骤
-在 `opencode` 会话中依次执行自然语言：
+### 3.1 远端容器直连 MCP（推荐）
+完整步骤（含 CPython 3.11 编译安装、启动、验收、负向测试）：
+- [REMOTE_MCP_OPERATION_GUIDE.md](/Users/fxl/pycharm_projects/package/docs/REMOTE_MCP_OPERATION_GUIDE.md)
+
+### 3.2 Local MCP Bridge（兜底）
+当远端 Python/mcp 受限时使用：
+- [LOCAL_MCP_BRIDGE_MANUAL_TEST_GUIDE.md](/Users/fxl/pycharm_projects/package/docs/LOCAL_MCP_BRIDGE_MANUAL_TEST_GUIDE.md)
+
+## 4. 手工验收统一口径
+
+核心步骤：
 1. `检查远端包管理服务健康状态`
 2. `列出当前可安装产品`
 3. `安装 DevKit-Porting-Advisor，先 dry-run`
 4. `执行真实安装 DevKit-Porting-Advisor 并返回状态`
+5. `调用 pm_status 查看 DevKit-Porting-Advisor 当前状态`
+6. 危险操作链路（建议工具级执行）：
+   1. `pm_update_config_plan`
+   2. `pm_confirm_plan`
+   3. `pm_update_config_apply`
+   4. `pm_uninstall_plan`
+   5. `pm_confirm_plan`
+   6. `pm_uninstall_apply`
 
-建议追加：
-1. `调用 pm_status 查看 DevKit-Porting-Advisor 当前状态`
+通过标准：
+1. `health.healthy=true`。
+2. list 返回目标产品。
+3. dry-run 返回 `status=success`。
+4. real install 返回 `status=success` 或同版本 skip。
+5. status 返回 `installed_version` 且 `last_result=success`。
+6. 危险操作未 confirm 时必须失败，confirm 后才能执行。
+7. 审计日志存在对应记录。
 
-### 3.3 通过标准
-1. 第 1 步返回 `healthy=true`。
-2. 第 2 步返回目标产品存在且 `enabled=true`。
-3. 第 3 步 dry-run 返回 `status=success`。
-4. 第 4 步真实安装返回 `status=success` 或“同版本已安装跳过”。
-5. `pm_status` 返回 `installed_version` 与 `last_result=success`。
+## 5. 常见失败与定位
 
-## 4. 常见失败与定位
 1. `401 Unauthorized`
-   - 校验 `Authorization` header、token 与 scope。
-2. `insufficient_scope`
-   - 读接口至少 `pm:read`，写接口至少 `pm:write`。
-3. `lock_timeout`
-   - 检查 `PACKAGE_MANAGER_INSTALL_LOCK_FILE` 是否位于可写目录。
-4. `command_timeout`
-   - 增加 `PACKAGE_MANAGER_COMMAND_TIMEOUT_SECONDS`。
-5. `command_exec_error`
-   - 检查 `PACKAGE_MANAGER_BINARY_PATH` 是否存在且可执行。
-6. `No enabled package found`
-   - 检查 `packages.yaml` 中产品 `enabled: true`。
+- 校验 `Authorization` header 与 token。
 
-## 5. 回归建议
+2. `insufficient_scope`
+- 读接口要 `pm:read`，写接口要 `pm:write`，危险操作要 `pm:admin`。
+
+3. `lock_timeout`
+- 检查 `PACKAGE_MANAGER_INSTALL_LOCK_FILE` 可写性。
+
+4. `command_timeout`
+- 提升 `PACKAGE_MANAGER_COMMAND_TIMEOUT_SECONDS`。
+
+5. `command_exec_error`
+- 检查 `PACKAGE_MANAGER_BINARY_PATH` 是否存在且可执行。
+
+6. `No enabled package found`
+- 检查 `packages.yaml` 产品 `enabled: true`。
+
+7. `confirm_required` / `confirm_expired` / `confirm_replayed`
+- 危险操作必须先 `pm_confirm_plan`。
+- `challenge_token` 默认短期有效，且单次消费。
+
+## 6. 回归建议
+
 1. 改动 `installer/*`：至少跑 `pytest -q`。
-2. 改动 `control_plane.py` 或 `mcp_server.py`：至少跑 MCP 三套测试。
-3. 交付前必须跑一次 `opencode` 手工验收四步链路。
+2. 改动 `control_plane.py` / `mcp_server.py`：至少跑 MCP 专项三套。
+3. 发布前至少完成一次手工验收（第 4 节五步）。

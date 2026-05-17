@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 from package_manager.downloader import download_file
@@ -62,15 +63,17 @@ def ensure_local_or_download(url: str, destination: Path, timeout_seconds: int, 
 
 
 def has_porting_advisor_runtime_layout(path: Path) -> bool:
-    return (path / "config").exists() and (path / "jre").exists() and any(path.glob("sql-analysis-*.jar"))
+    legacy = (path / "config").exists() and (path / "jre").exists() and any(path.glob("sql-analysis-*.jar"))
+    modern = (path / "config").exists() and (path / "jre").exists() and any(path.glob("cmd/bin/sql-analysis-*.jar"))
+    return legacy or modern
 
 
 def detect_porting_advisor_payload_dir(base_dir: Path) -> Path:
-    if has_porting_advisor_payload_archives(base_dir):
+    if has_porting_advisor_payload_archives(base_dir) or has_porting_advisor_modern_payload(base_dir):
         return base_dir
     candidates = sorted([item for item in base_dir.iterdir() if item.is_dir()], key=lambda item: item.name)
     for candidate in candidates:
-        if has_porting_advisor_payload_archives(candidate):
+        if has_porting_advisor_payload_archives(candidate) or has_porting_advisor_modern_payload(candidate):
             return candidate
     raise InstallError(f"No Porting-Advisor payload directory found under {base_dir}")
 
@@ -79,22 +82,50 @@ def has_porting_advisor_payload_archives(path: Path) -> bool:
     return any(path.glob("Sql-Analysis-*-Linux-Kunpeng.tar.gz")) and any(path.glob("jre-linux-*.tar.gz"))
 
 
+def has_porting_advisor_modern_payload(path: Path) -> bool:
+    has_config = (path / "config").is_dir()
+    has_jre_tar = any(path.glob("jre-linux-*.tar.gz"))
+    has_sql_jar = any(path.glob("cmd/bin/sql-analysis-*.jar"))
+    return has_config and has_jre_tar and has_sql_jar
+
+
 def install_porting_advisor_runtime_layout(payload_dir: Path, install_dir: Path) -> None:
-    sql_tar = first_match(payload_dir, "Sql-Analysis-*-Linux-Kunpeng.tar.gz")
-    jre_tar = first_match(payload_dir, "jre-linux-*.tar.gz")
-    extract_tar_package(sql_tar, payload_dir)
-    extract_tar_package(jre_tar, payload_dir)
+    if has_porting_advisor_payload_archives(payload_dir):
+        sql_tar = first_match(payload_dir, "Sql-Analysis-*-Linux-Kunpeng.tar.gz")
+        jre_tar = first_match(payload_dir, "jre-linux-*.tar.gz")
+        extract_tar_package(sql_tar, payload_dir)
+        extract_tar_package(jre_tar, payload_dir)
 
-    sql_dir = first_child_dir_match(payload_dir, "Sql-Analysis-*")
-    jar_file = first_match(sql_dir, "*.jar")
-    if not (sql_dir / "config").exists():
-        raise InstallError(f"Sql-Analysis config directory not found under {sql_dir}")
-    if not (payload_dir / "jre").exists():
-        raise InstallError(f"jre directory not found under {payload_dir}")
+        sql_dir = first_child_dir_match(payload_dir, "Sql-Analysis-*")
+        jar_file = first_match(sql_dir, "*.jar")
+        if not (sql_dir / "config").exists():
+            raise InstallError(f"Sql-Analysis config directory not found under {sql_dir}")
+        if not (payload_dir / "jre").exists():
+            raise InstallError(f"jre directory not found under {payload_dir}")
 
-    shutil.copytree(sql_dir / "config", install_dir / "config")
-    shutil.copytree(payload_dir / "jre", install_dir / "jre")
-    shutil.copy2(jar_file, install_dir / jar_file.name)
+        shutil.copytree(sql_dir / "config", install_dir / "config")
+        shutil.copytree(payload_dir / "jre", install_dir / "jre")
+        shutil.copy2(jar_file, install_dir / jar_file.name)
+        return
+
+    if has_porting_advisor_modern_payload(payload_dir):
+        for item in payload_dir.iterdir():
+            target = install_dir / item.name
+            if item.is_dir():
+                shutil.copytree(item, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, target)
+
+        jre_tar = first_match(install_dir, "jre-linux-*.tar.gz")
+        extract_tar_package(jre_tar, install_dir)
+
+        porting_zip = install_dir / "porting.zip"
+        if porting_zip.exists():
+            with zipfile.ZipFile(porting_zip, "r") as archive:
+                archive.extractall(install_dir)
+        return
+
+    raise InstallError(f"Unsupported Porting-Advisor payload layout under {payload_dir}")
 
 
 def first_child_dir(path: Path, exclude: str = "") -> Path:

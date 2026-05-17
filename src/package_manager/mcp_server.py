@@ -6,6 +6,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import time
@@ -16,6 +17,10 @@ from typing import Any, Dict, Optional, Sequence
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.auth.settings import AuthSettings
+except Exception:  # pragma: no cover - keep compatibility with older mcp versions
+    AuthSettings = None  # type: ignore[assignment]
 
 from package_manager.control_plane import ControlPlaneSettings, PackageManagerControlPlane
 
@@ -147,6 +152,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--token", default=os.getenv("PACKAGE_MANAGER_MCP_TOKEN", ""))
     parser.add_argument("--token-scopes", default=os.getenv("PACKAGE_MANAGER_MCP_TOKEN_SCOPES", "pm:all"))
     parser.add_argument("--hmac-secret", default=os.getenv("PACKAGE_MANAGER_MCP_HMAC_SECRET", ""))
+    parser.add_argument("--public-base-url", default=os.getenv("PACKAGE_MANAGER_MCP_PUBLIC_BASE_URL", ""))
+    parser.add_argument(
+        "--stateless-http",
+        action="store_true",
+        default=env_flag("PACKAGE_MANAGER_MCP_STATELESS_HTTP", default=True),
+        help="Use stateless streamable-http mode to avoid session-id coupling.",
+    )
     parser.add_argument(
         "--auth-disabled",
         action="store_true",
@@ -160,6 +172,20 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Allow auth disabled even when host is non-loopback.",
     )
     return parser.parse_args(argv)
+
+
+def default_public_base_url(host: str, port: int) -> str:
+    normalized = (host or "").strip()
+    if normalized in {"0.0.0.0", "::", "[::]"}:
+        normalized = "127.0.0.1"
+    return f"http://{normalized}:{int(port)}"
+
+
+def fastmcp_supports(name: str) -> bool:
+    try:
+        return name in inspect.signature(FastMCP.__init__).parameters
+    except Exception:
+        return False
 
 
 def build_control_plane(args: argparse.Namespace) -> PackageManagerControlPlane:
@@ -194,15 +220,25 @@ def build_server(args: argparse.Namespace) -> FastMCP:
             "auth-disabled on non-loopback host is blocked by default, set --allow-auth-disabled-nonlocal to override"
         )
 
-    mcp = FastMCP(
-        name="package-manager-mcp",
-        instructions="Package management tools for install/status/health actions.",
-        host=args.host,
-        port=args.port,
-        streamable_http_path=args.path,
-        token_verifier=token_verifier,
-        log_level="INFO",
-    )
+    mcp_kwargs: Dict[str, Any] = {
+        "name": "package-manager-mcp",
+        "instructions": "Package management tools for install/status/health actions.",
+        "host": args.host,
+        "port": args.port,
+        "streamable_http_path": args.path,
+        "token_verifier": token_verifier,
+        "log_level": "INFO",
+    }
+    if token_verifier is not None and AuthSettings is not None:
+        public_base_url = (args.public_base_url or "").strip() or default_public_base_url(args.host, args.port)
+        mcp_kwargs["auth"] = AuthSettings(
+            issuer_url=public_base_url,
+            resource_server_url=public_base_url,
+            required_scopes=normalize_scopes(args.token_scopes) or ["pm:all"],
+        )
+    if args.stateless_http and fastmcp_supports("stateless_http"):
+        mcp_kwargs["stateless_http"] = True
+    mcp = FastMCP(**mcp_kwargs)
 
     def require_scope(required_scope: str) -> None:
         if args.auth_disabled:
@@ -214,6 +250,14 @@ def build_server(args: argparse.Namespace) -> FastMCP:
         if "pm:all" in scopes or required_scope in scopes:
             return
         raise PermissionError(f"insufficient_scope: required={required_scope}, granted={sorted(scopes)}")
+
+    def current_actor() -> str:
+        if args.auth_disabled:
+            return "auth-disabled"
+        access = get_access_token()
+        if access is None:
+            return "unknown"
+        return str(access.client_id or "unknown")
 
     @mcp.tool(name="pm_health", description="Check package-manager runtime health on remote host.")
     def pm_health() -> Dict[str, Any]:
@@ -230,18 +274,110 @@ def build_server(args: argparse.Namespace) -> FastMCP:
         require_scope("pm:read")
         return control_plane.status(product=product)
 
-    @mcp.tool(name="pm_install", description="Install a package product by name via package-manager binary.")
+    @mcp.tool(
+        name="pm_install",
+        description=(
+            "Low-level install primitive. Prefer pm_skill_install_guarded for user-facing install requests, "
+            "especially when dry-run and final status confirmation are required."
+        ),
+    )
     def pm_install(product: str, dry_run: bool = False) -> Dict[str, Any]:
         require_scope("pm:write")
         return control_plane.install(product=product, dry_run=dry_run)
 
     @mcp.tool(
         name="pm_skill_install_guarded",
-        description="Guarded install skill: health -> list -> dry-run -> real install -> status.",
+        description=(
+            "Preferred install workflow for natural-language install intents: "
+            "health -> list -> dry-run -> real install -> status."
+        ),
     )
     def pm_skill_install_guarded(product: str) -> Dict[str, Any]:
         require_scope("pm:write")
         return control_plane.install_with_guardrails(product=product)
+
+    @mcp.tool(name="pm_get_config", description="Read runtime package config (full or selected path/product).")
+    def pm_get_config(path: Optional[str] = None, product: Optional[str] = None) -> Dict[str, Any]:
+        require_scope("pm:read")
+        return control_plane.get_config(path=path, product=product)
+
+    @mcp.tool(
+        name="pm_update_config_plan",
+        description="Plan configuration changes and risk assessment. No state mutation.",
+    )
+    def pm_update_config_plan(operations: list[dict[str, Any]], reason: str = "") -> Dict[str, Any]:
+        require_scope("pm:admin")
+        return control_plane.update_config_plan(operations=operations, actor=current_actor(), reason=reason)
+
+    @mcp.tool(
+        name="pm_uninstall_plan",
+        description="Plan package uninstall impact and risk. No state mutation.",
+    )
+    def pm_uninstall_plan(product: str, reason: str = "") -> Dict[str, Any]:
+        require_scope("pm:admin")
+        return control_plane.uninstall_plan(product=product, actor=current_actor(), reason=reason)
+
+    @mcp.tool(
+        name="pm_confirm_plan",
+        description="Issue short-lived challenge token for a pending dangerous plan.",
+    )
+    def pm_confirm_plan(plan_id: str) -> Dict[str, Any]:
+        require_scope("pm:admin")
+        return control_plane.confirm_plan(plan_id=plan_id, actor=current_actor())
+
+    @mcp.tool(
+        name="pm_update_config_apply",
+        description="Apply a planned config change with challenge token and idempotency key.",
+    )
+    def pm_update_config_apply(
+        plan_id: str,
+        challenge_token: str,
+        idempotency_key: str,
+        request_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        require_scope("pm:admin")
+        req = (request_id or "").strip() or f"req-{os.urandom(6).hex()}"
+        return control_plane.update_config_apply(
+            plan_id=plan_id,
+            challenge_token=challenge_token,
+            request_id=req,
+            idempotency_key=idempotency_key,
+            actor=current_actor(),
+        )
+
+    @mcp.tool(
+        name="pm_uninstall_apply",
+        description="Apply a planned uninstall with challenge token and idempotency key.",
+    )
+    def pm_uninstall_apply(
+        plan_id: str,
+        challenge_token: str,
+        idempotency_key: str,
+        request_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        require_scope("pm:admin")
+        req = (request_id or "").strip() or f"req-{os.urandom(6).hex()}"
+        return control_plane.uninstall_apply(
+            plan_id=plan_id,
+            challenge_token=challenge_token,
+            request_id=req,
+            idempotency_key=idempotency_key,
+            actor=current_actor(),
+        )
+
+    @mcp.tool(
+        name="pm_rollback_config",
+        description="Rollback config from a backup version id. Requires admin scope.",
+    )
+    def pm_rollback_config(version_id: str, idempotency_key: str, request_id: Optional[str] = None) -> Dict[str, Any]:
+        require_scope("pm:admin")
+        req = (request_id or "").strip() or f"req-{os.urandom(6).hex()}"
+        return control_plane.rollback_config(
+            version_id=version_id,
+            request_id=req,
+            idempotency_key=idempotency_key,
+            actor=current_actor(),
+        )
 
     return mcp
 

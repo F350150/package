@@ -1,18 +1,20 @@
 ---
 name: package-manager-install-guarded
-description: 使用 MCP 做包安装时的默认技能（中文/英文请求都应触发）。当用户表达“安装/部署/升级/验证安装/先 dry-run/再真实安装/返回安装状态”等意图时，必须优先使用本技能，而不是直接只调 pm_install。标准顺序是 health -> list -> dry-run -> real install -> status。适用于 DevKit-Porting-Advisor、devkit-porting 等产品。
+description: 包安装兜底技能。若被直接触发，必须先做网络探测并自动路由在线/离线；禁止跳过探测直接安装。
 ---
 
 ## Scope
 
-Use this skill when the user wants package installation or installation validation through MCP tools.
+This skill is a fallback when routing skill is not selected.
+
+If triggered directly, it must still perform network probe and route automatically.
 
 Hard boundary:
 - Do not read local files for package-manager config/state in this skill.
 - Do not use shell file discovery (`ls/find/glob/cat`) for runtime config checks.
 - Only use MCP tools from `package-manager-remote`.
 
-### Trigger Phrases (must trigger this skill)
+### Trigger Phrases (fallback)
 
 - “安装 DevKit-Porting-Advisor，先 dry-run”
 - “执行真实安装并返回状态”
@@ -21,7 +23,7 @@ Hard boundary:
 - "install xxx with dry-run first"
 - "run guarded install and return final status"
 
-When these intents appear, do not stop after a single `pm_install` call.
+When these intents appear directly from user, run probe-first routing in this skill itself.
 
 Use product names as configured in runtime YAML, for example:
 
@@ -30,6 +32,9 @@ Use product names as configured in runtime YAML, for example:
 
 ## Required Tools
 
+- `pm_probe_network`
+- `pm_offline_manifest`
+- `pm_check_offline_artifacts`
 - `pm_health`
 - `pm_list_packages`
 - `pm_status`
@@ -38,15 +43,19 @@ Use product names as configured in runtime YAML, for example:
 
 ## Standard Flow
 
-1. Call `pm_health`.
-2. If unhealthy, stop and return the health failure details.
-3. Call `pm_list_packages` to confirm target product exists and is enabled.
-4. Prefer calling `pm_skill_install_guarded` for one-shot guarded execution.
-5. If `pm_skill_install_guarded` is unavailable, run fallback:
-   - `pm_install` with `dry_run=true`
-   - `pm_install` with `dry_run=false`
-   - `pm_status` for final confirmation
-6. Return concise phase-by-phase result with exit or status fields.
+1. Call `pm_probe_network(product)` first. This step is mandatory.
+2. If `recommended_mode=online`:
+   - call `pm_health`
+   - call `pm_list_packages`
+   - call `pm_skill_install_guarded(product)` (or low-level fallback)
+   - call `pm_status(product)`
+3. If `recommended_mode=offline`:
+   - call `pm_offline_manifest(product)`
+   - explicitly stop and ask for local stage/upload execution by wrapper/local skill (do not fake success)
+   - after upload, call `pm_check_offline_artifacts(product)` and require `ready_for_offline_install=true`
+   - call `pm_skill_install_guarded(product)`
+   - call `pm_status(product)`
+4. Return concise phase-by-phase result with executed branch (`online`/`offline`).
 
 ## Output Contract
 

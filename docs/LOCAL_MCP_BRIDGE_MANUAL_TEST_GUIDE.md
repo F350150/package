@@ -2,7 +2,7 @@
 
 本文档用于在“远端 Python/mcp 环境受限”时，采用 Local MCP Bridge 方案完成全链路手工验收。
 
-适用日期：2026-05-17
+适用日期：2026-05-18
 
 ---
 
@@ -16,11 +16,10 @@
 
 最终通过标准：
 
-1. `pm_health` 返回 `healthy=true`。
-2. `pm_list_packages` 返回目标产品（如 `DevKit-Porting-Advisor`）。
-3. `pm_install(dry_run=true)` 返回 `status=success`。
-4. `pm_install(dry_run=false)` 返回 `status=success`（或同版本已安装跳过）。
-5. `pm_status` 返回目标产品已安装且 `last_result=success`。
+1. 安装自然语言请求先触发 `pm_probe_network`。
+2. 根据 `recommended_mode` 自动分支（online/offline）。
+3. offline 分支会先完成离线制品投放，再安装。
+4. 最终 `pm_status` 返回目标产品已安装且 `last_result=success`。
 
 ---
 
@@ -202,7 +201,20 @@ opencode mcp list
 
 在 `opencode` 会话中逐条执行。
 
-### 步骤 7.1：健康检查
+### 步骤 7.1：自动路由安装（主用例）
+输入：
+`安装 DevKit-Porting-Advisor，并返回每个阶段结果`
+
+预期：
+1. 首先调用 `pm_probe_network`。
+2. online 分支：`pm_skill_install_guarded -> pm_status`。
+3. offline 分支：`pm_offline_manifest -> 本地离线投放 -> pm_check_offline_artifacts -> pm_skill_install_guarded -> pm_status`。
+
+验证点：
+1. 第一阶段必须是网络探测。
+2. 分支和 `recommended_mode` 一致。
+
+### 步骤 7.2：健康检查
 输入：
 `检查远端包管理服务健康状态`
 
@@ -215,7 +227,7 @@ opencode mcp list
 2. `config_exists=true`
 3. `state_parent_exists=true`
 
-### 步骤 7.2：列包
+### 步骤 7.3：列包
 输入：
 `列出当前可安装产品`
 
@@ -227,7 +239,7 @@ opencode mcp list
 1. 包含 `DevKit-Porting-Advisor`。
 2. `count >= 1`。
 
-### 步骤 7.3：dry-run
+### 步骤 7.4：dry-run
 输入：
 `安装 DevKit-Porting-Advisor，先 dry-run`
 
@@ -239,7 +251,7 @@ opencode mcp list
 1. 返回中 `dry_run=true`。
 2. `dry_run_mode=simulate`（当前方案）。
 
-### 步骤 7.4：真实安装
+### 步骤 7.5：真实安装
 输入：
 `执行真实安装 DevKit-Porting-Advisor 并返回状态`
 
@@ -253,7 +265,7 @@ opencode mcp list
 2. `status.state.installed_version` 存在。
 3. `status.state.last_result=success`。
 
-### 步骤 7.5：显式状态复核
+### 步骤 7.6：显式状态复核
 输入：
 `调用 pm_status 查看 DevKit-Porting-Advisor 当前状态`
 
@@ -352,10 +364,11 @@ rm -rf /private/tmp/pm-mcp-bridge
 - 执行日期：
 - 测试人：
 - 环境：`opencode version` / `docker image` / `container name`
-- Step 7.1（health）：通过/失败，证据：
-- Step 7.2（list）：通过/失败，证据：
-- Step 7.3（dry-run）：通过/失败，证据：
-- Step 7.4（real install）：通过/失败，证据：
-- Step 7.5（status）：通过/失败，证据：
+- Step 7.1（auto-route）：通过/失败，证据：
+- Step 7.2（health）：通过/失败，证据：
+- Step 7.3（list）：通过/失败，证据：
+- Step 7.4（dry-run）：通过/失败，证据：
+- Step 7.5（real install）：通过/失败，证据：
+- Step 7.6（status）：通过/失败，证据：
 - Step 8（一致性验证）：通过/失败，证据：
 - 结论：通过 / 不通过

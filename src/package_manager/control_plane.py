@@ -11,7 +11,9 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -20,11 +22,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 import yaml
 
 from package_manager.config import RuntimeConfig, load_raw_config_from_path, load_runtime_config_from_path, runtime_config_from_raw
+from package_manager.downloader import get_remote_file_size
 from package_manager.install_state import load_install_state
+from package_manager.resolver import resolve_package
 
 
 def now_utc() -> str:
@@ -68,6 +73,12 @@ class ControlPlaneSettings:
     config_backup_dir: Path = Path("/opt/package-manager/current/.package-manager/config-backups")
     plan_ttl_seconds: int = 300
     confirm_ttl_seconds: int = 60
+    offline_stage_script: Path = Path("")
+    offline_default_ssh_target: str = ""
+    offline_default_ssh_port: int = 22
+    offline_default_ssh_key: str = ""
+    offline_default_docker_container: str = ""
+    offline_default_local_cache_dir: str = "/tmp/pm-offline-cache"
 
     @classmethod
     def from_env(cls) -> "ControlPlaneSettings":
@@ -138,6 +149,15 @@ class ControlPlaneSettings:
         ).expanduser()
         plan_ttl = int(os.getenv("PACKAGE_MANAGER_PLAN_TTL_SECONDS", "300"))
         confirm_ttl = int(os.getenv("PACKAGE_MANAGER_CONFIRM_TTL_SECONDS", "60"))
+        offline_stage_script_env = (os.getenv("PACKAGE_MANAGER_OFFLINE_STAGE_SCRIPT", "") or "").strip()
+        offline_stage_script = Path(offline_stage_script_env).expanduser() if offline_stage_script_env else Path("")
+        offline_default_ssh_target = (os.getenv("PACKAGE_MANAGER_OFFLINE_SSH_TARGET", "") or "").strip()
+        offline_default_ssh_port = int(os.getenv("PACKAGE_MANAGER_OFFLINE_SSH_PORT", "22"))
+        offline_default_ssh_key = (os.getenv("PACKAGE_MANAGER_OFFLINE_SSH_KEY", "") or "").strip()
+        offline_default_docker_container = (os.getenv("PACKAGE_MANAGER_OFFLINE_DOCKER_CONTAINER", "") or "").strip()
+        offline_default_local_cache_dir = (
+            os.getenv("PACKAGE_MANAGER_OFFLINE_LOCAL_CACHE_DIR", "/tmp/pm-offline-cache") or "/tmp/pm-offline-cache"
+        ).strip()
         return cls(
             binary_path=binary_path,
             config_file=config_file,
@@ -155,6 +175,12 @@ class ControlPlaneSettings:
             config_backup_dir=config_backup_dir,
             plan_ttl_seconds=max(30, plan_ttl),
             confirm_ttl_seconds=max(15, confirm_ttl),
+            offline_stage_script=offline_stage_script,
+            offline_default_ssh_target=offline_default_ssh_target,
+            offline_default_ssh_port=max(1, offline_default_ssh_port),
+            offline_default_ssh_key=offline_default_ssh_key,
+            offline_default_docker_container=offline_default_docker_container,
+            offline_default_local_cache_dir=offline_default_local_cache_dir,
         )
 
 
@@ -455,6 +481,206 @@ class PackageManagerControlPlane:
             "value": selected,
             "config_sha256": self._sha256_json(raw),
             "timestamp": now_utc(),
+        }
+
+    def offline_manifest(self, product: str) -> Dict[str, Any]:
+        request_id = f"req-{uuid.uuid4().hex[:12]}"
+        package = self._resolve_product_package(product)
+        app_root = self.settings.binary_path.parent.resolve()
+        return {
+            "request_id": request_id,
+            "status": "success",
+            "product": package["product"],
+            "project_version": package["project_version"],
+            "artifact_version": package["artifact_version"],
+            "filename": package["filename"],
+            "package_url": package["package_url"],
+            "signature_url": package["signature_url"],
+            "remote_package_path": package["package_path"],
+            "remote_signature_path": package["signature_path"],
+            "remote_download_dir": str(Path(package["package_path"]).parent),
+            "remote_app_root": str(app_root),
+            "timestamp": now_utc(),
+        }
+
+    def check_offline_artifacts(self, product: str) -> Dict[str, Any]:
+        request_id = f"req-{uuid.uuid4().hex[:12]}"
+        package = self._resolve_product_package(product)
+        package_path = Path(package["package_path"])
+        signature_path = Path(package["signature_path"])
+        package_exists = package_path.exists() and package_path.is_file()
+        signature_exists = signature_path.exists() and signature_path.is_file()
+        package_size = package_path.stat().st_size if package_exists else 0
+        signature_size = signature_path.stat().st_size if signature_exists else 0
+        return {
+            "request_id": request_id,
+            "status": "success",
+            "product": package["product"],
+            "package_exists": package_exists,
+            "signature_exists": signature_exists,
+            "package_size": package_size,
+            "signature_size": signature_size,
+            "package_path": str(package_path),
+            "signature_path": str(signature_path),
+            "ready_for_offline_install": package_exists and signature_exists and package_size > 0 and signature_size > 0,
+            "timestamp": now_utc(),
+        }
+
+    def probe_network_for_product(self, product: str, timeout_seconds: int = 5) -> Dict[str, Any]:
+        request_id = f"req-{uuid.uuid4().hex[:12]}"
+        package = self._resolve_product_package(product)
+        package_url = str(package["package_url"])
+        parsed = urlparse(package_url)
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        timeout = max(1, int(timeout_seconds))
+        socket_ok = False
+        socket_error = ""
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                socket_ok = True
+        except Exception as exc:
+            socket_error = str(exc)
+        remote_size = None
+        size_probe_ok = False
+        try:
+            remote_size = get_remote_file_size(package_url, timeout, ssl_verify=False)
+            size_probe_ok = remote_size is not None
+        except Exception:
+            size_probe_ok = False
+        online = socket_ok and size_probe_ok
+        return {
+            "request_id": request_id,
+            "status": "success",
+            "product": package["product"],
+            "host": host,
+            "port": port,
+            "socket_ok": socket_ok,
+            "socket_error": socket_error,
+            "size_probe_ok": size_probe_ok,
+            "remote_size": remote_size,
+            "recommended_mode": "online" if online else "offline",
+            "timestamp": now_utc(),
+        }
+
+    def offline_stage_and_install(
+        self,
+        product: str,
+        ssh_target: str = "",
+        ssh_port: int = 22,
+        ssh_key: str = "",
+        docker_container: str = "",
+        local_cache_dir: str = "/tmp/pm-offline-cache",
+        timeout_seconds: int = 5,
+        force_mode: str = "auto",
+    ) -> Dict[str, Any]:
+        request_id = f"req-{uuid.uuid4().hex[:12]}"
+        started_at = now_utc()
+        mode = (force_mode or "auto").strip().lower()
+        if mode not in {"auto", "online", "offline"}:
+            return {
+                "request_id": request_id,
+                "status": "error",
+                "action": "offline_stage_and_install",
+                "error_code": "validation_failed",
+                "message": f"unsupported force_mode: {force_mode}",
+                "timestamp": now_utc(),
+            }
+
+        phases: Dict[str, Any] = {}
+        probe = self.probe_network_for_product(product=product, timeout_seconds=timeout_seconds)
+        phases["probe_network"] = probe
+        selected_mode = probe.get("recommended_mode", "offline")
+        if mode != "auto":
+            selected_mode = mode
+
+        if selected_mode == "online":
+            install_result = self.install_with_guardrails(product=product)
+            status_result = self.status(product=product)
+            phases["install"] = install_result
+            phases["status"] = status_result
+            final_ok = install_result.get("status") == "success" and status_result.get("status") == "success"
+            return {
+                "request_id": request_id,
+                "status": "success" if final_ok else "error",
+                "action": "offline_stage_and_install",
+                "product": product,
+                "executed_mode": "online",
+                "phases": phases,
+                "started_at": started_at,
+                "ended_at": now_utc(),
+            }
+
+        effective_ssh_target = (ssh_target or self.settings.offline_default_ssh_target).strip()
+        effective_ssh_key = (ssh_key or self.settings.offline_default_ssh_key).strip()
+        effective_docker_container = (docker_container or self.settings.offline_default_docker_container).strip()
+        effective_ssh_port = max(1, int(ssh_port or self.settings.offline_default_ssh_port))
+        effective_cache_dir = (local_cache_dir or self.settings.offline_default_local_cache_dir).strip()
+
+        manifest = self.offline_manifest(product=product)
+        phases["offline_manifest"] = manifest
+        before_check = self.check_offline_artifacts(product=product)
+        phases["offline_artifact_check_before_stage"] = before_check
+        if bool(before_check.get("ready_for_offline_install")):
+            phases["stage_upload"] = {
+                "status": "success",
+                "stage_skipped": True,
+                "message": "offline artifacts already ready, skip stage/upload",
+            }
+            check = before_check
+        else:
+            stage_result = self._stage_offline_artifacts(
+                manifest=manifest,
+                ssh_target=effective_ssh_target,
+                ssh_port=effective_ssh_port,
+                ssh_key=effective_ssh_key,
+                docker_container=effective_docker_container,
+                local_cache_dir=effective_cache_dir,
+            )
+            phases["stage_upload"] = stage_result
+            if stage_result.get("status") != "success":
+                return {
+                    "request_id": request_id,
+                    "status": "error",
+                    "action": "offline_stage_and_install",
+                    "product": product,
+                    "executed_mode": "offline",
+                    "error_code": "stage_failed",
+                    "message": "offline stage/upload failed",
+                    "phases": phases,
+                    "started_at": started_at,
+                    "ended_at": now_utc(),
+                }
+            check = self.check_offline_artifacts(product=product)
+        phases["offline_artifact_check"] = check
+        if not bool(check.get("ready_for_offline_install")):
+            return {
+                "request_id": request_id,
+                "status": "error",
+                "action": "offline_stage_and_install",
+                "product": product,
+                "executed_mode": "offline",
+                "error_code": "artifact_not_ready",
+                "message": "offline artifacts are not ready after stage/upload",
+                "phases": phases,
+                "started_at": started_at,
+                "ended_at": now_utc(),
+            }
+
+        install_result = self.install_with_guardrails(product=product)
+        status_result = self.status(product=product)
+        phases["install"] = install_result
+        phases["status"] = status_result
+        final_ok = install_result.get("status") == "success" and status_result.get("status") == "success"
+        return {
+            "request_id": request_id,
+            "status": "success" if final_ok else "error",
+            "action": "offline_stage_and_install",
+            "product": product,
+            "executed_mode": "offline",
+            "phases": phases,
+            "started_at": started_at,
+            "ended_at": now_utc(),
         }
 
     def update_config_plan(
@@ -965,6 +1191,28 @@ class PackageManagerControlPlane:
                 }
         raise ValueError(f"unknown product: {product}")
 
+    def _resolve_product_package(self, product: str) -> Dict[str, Any]:
+        runtime = self._runtime()
+        target = (product or "").strip().lower()
+        selected = None
+        for pkg in runtime.packages:
+            if pkg.product.strip().lower() == target:
+                selected = pkg
+                break
+        if selected is None:
+            raise ValueError(f"unknown product: {product}")
+        resolved = resolve_package(selected, runtime.download_defaults)
+        return {
+            "product": selected.product,
+            "project_version": selected.version,
+            "artifact_version": selected.artifact_version,
+            "filename": resolved.filename,
+            "package_url": resolved.package_url,
+            "signature_url": resolved.signature_url,
+            "package_path": str(resolved.package_path),
+            "signature_path": str(resolved.signature_path),
+        }
+
     def _same_install_dir_products(self, install_dir: str, excluded_product: str) -> List[str]:
         runtime = self._runtime()
         result: List[str] = []
@@ -975,6 +1223,99 @@ class PackageManagerControlPlane:
             if str(pkg.install_dir).strip() == normalized:
                 result.append(pkg.product)
         return sorted(result)
+
+    def _resolve_offline_stage_script(self) -> Path:
+        explicit = self.settings.offline_stage_script
+        if explicit and str(explicit).strip():
+            return explicit
+        candidates = [
+            self.settings.binary_path.parent.parent / "scripts" / "pm_offline_stage_and_upload.py",
+            Path(__file__).resolve().parents[2] / "scripts" / "pm_offline_stage_and_upload.py",
+        ]
+        for item in candidates:
+            if item.exists():
+                return item
+        return candidates[0]
+
+    def _stage_offline_artifacts(
+        self,
+        manifest: Dict[str, Any],
+        ssh_target: str,
+        ssh_port: int,
+        ssh_key: str,
+        docker_container: str,
+        local_cache_dir: str,
+    ) -> Dict[str, Any]:
+        script = self._resolve_offline_stage_script()
+        if not script.exists():
+            return {
+                "status": "error",
+                "error_code": "stage_script_missing",
+                "message": f"offline stage script not found: {script}",
+            }
+        if not ssh_target and not docker_container:
+            return {
+                "status": "error",
+                "error_code": "validation_failed",
+                "message": "either ssh_target or docker_container must be provided for offline mode",
+            }
+
+        manifest_text = json.dumps(manifest, ensure_ascii=True)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as fp:
+            fp.write(manifest_text)
+            manifest_file = fp.name
+
+        cmd = [sys.executable, str(script), "--manifest-file", manifest_file, "--local-cache-dir", local_cache_dir]
+        if ssh_target:
+            cmd.extend(["--ssh-target", ssh_target, "--ssh-port", str(max(1, int(ssh_port)))])
+            if ssh_key:
+                cmd.extend(["--ssh-key", ssh_key])
+        if docker_container:
+            cmd.extend(["--docker-container", docker_container])
+
+        started_at = now_utc()
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=max(60, self.settings.command_timeout_seconds),
+            )
+            combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            return {
+                "status": "success" if proc.returncode == 0 else "error",
+                "exit_code": proc.returncode,
+                "command": cmd,
+                "output_tail": tail_lines(combined, limit=120),
+                "started_at": started_at,
+                "ended_at": now_utc(),
+            }
+        except subprocess.TimeoutExpired as exc:
+            combined = (exc.stdout or "") + "\n" + (exc.stderr or "")
+            return {
+                "status": "error",
+                "exit_code": None,
+                "error_code": "command_timeout",
+                "command": cmd,
+                "output_tail": tail_lines(combined, limit=120),
+                "started_at": started_at,
+                "ended_at": now_utc(),
+            }
+        except OSError as exc:
+            return {
+                "status": "error",
+                "exit_code": None,
+                "error_code": "command_failed",
+                "message": str(exc),
+                "command": cmd,
+                "started_at": started_at,
+                "ended_at": now_utc(),
+            }
+        finally:
+            try:
+                Path(manifest_file).unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _read_config_path(self, raw: Dict[str, Any], path: str) -> Any:
         text = (path or "").strip()

@@ -302,6 +302,59 @@ def build_server(args: argparse.Namespace) -> FastMCP:
         return control_plane.get_config(path=path, product=product)
 
     @mcp.tool(
+        name="pm_probe_network",
+        description="Probe remote download network reachability for a product and recommend online/offline mode.",
+    )
+    def pm_probe_network(product: str, timeout_seconds: int = 5) -> Dict[str, Any]:
+        require_scope("pm:read")
+        return control_plane.probe_network_for_product(product=product, timeout_seconds=timeout_seconds)
+
+    @mcp.tool(
+        name="pm_offline_manifest",
+        description="Return offline install manifest: URLs + required remote artifact paths for a product.",
+    )
+    def pm_offline_manifest(product: str) -> Dict[str, Any]:
+        require_scope("pm:read")
+        return control_plane.offline_manifest(product=product)
+
+    @mcp.tool(
+        name="pm_check_offline_artifacts",
+        description="Check whether required package/signature files are present on remote for offline install.",
+    )
+    def pm_check_offline_artifacts(product: str) -> Dict[str, Any]:
+        require_scope("pm:read")
+        return control_plane.check_offline_artifacts(product=product)
+
+    @mcp.tool(
+        name="pm_offline_stage_and_install",
+        description=(
+            "One-shot install workflow: probe network, choose online/offline branch automatically, "
+            "offline branch performs stage/upload then guarded install and status confirmation."
+        ),
+    )
+    def pm_offline_stage_and_install(
+        product: str,
+        ssh_target: str = "",
+        ssh_port: int = 22,
+        ssh_key: str = "",
+        docker_container: str = "",
+        local_cache_dir: str = "/tmp/pm-offline-cache",
+        timeout_seconds: int = 5,
+        force_mode: str = "auto",
+    ) -> Dict[str, Any]:
+        require_scope("pm:write")
+        return control_plane.offline_stage_and_install(
+            product=product,
+            ssh_target=ssh_target,
+            ssh_port=ssh_port,
+            ssh_key=ssh_key,
+            docker_container=docker_container,
+            local_cache_dir=local_cache_dir,
+            timeout_seconds=timeout_seconds,
+            force_mode=force_mode,
+        )
+
+    @mcp.tool(
         name="pm_update_config_plan",
         description="Plan configuration changes and risk assessment. No state mutation.",
     )

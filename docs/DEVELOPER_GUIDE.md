@@ -13,6 +13,7 @@
 ## 2. 两条运行主线
 1. CLI 线：`main -> service -> installer`。
 2. MCP 线：`mcp_server(FastMCP) -> control_plane -> package-manager binary`。
+3. 自然语言安装线：`opencode skill(auto-router) -> pm_probe_network -> online/offline 分支`。
 
 ## 3. 版本语义（必须遵守）
 1. `project_version`：用于项目目录与 install_state 版本比较。
@@ -22,10 +23,12 @@
 ## 4. MCP 设计约束
 1. MCP 工具必须只做白名单动作，不接受任意 shell。
 2. 授权最小化：
-   - `pm_health/pm_list_packages/pm_status` 需要 `pm:read`
-   - `pm_install/pm_skill_install_guarded` 需要 `pm:write`
+   - `pm_health/pm_list_packages/pm_status/pm_get_config/pm_probe_network/pm_offline_manifest/pm_check_offline_artifacts` 需要 `pm:read`
+   - `pm_install/pm_skill_install_guarded/pm_offline_stage_and_install` 需要 `pm:write`
+   - `pm_update_config_plan/pm_confirm_plan/pm_update_config_apply/pm_uninstall_plan/pm_uninstall_apply/pm_rollback_config` 需要 `pm:admin`
 3. 鉴权默认开启，`auth-disabled` 仅允许 loopback；非 loopback 需显式 override。
 4. 所有工具返回结构化结果，必须包含 `status/request_id/timestamp`（适用时）。
+5. 安装意图的默认行为必须是“先探测网络再路由”，禁止直接跳过探测。
 
 ## 5. 如何新增一个产品
 1. 在 `packages.yaml` 增加产品配置：`product/project_version/artifact_version/package_format/install_dir`。
@@ -41,19 +44,26 @@
    - `tests/test_control_plane.py`
    - `tests/test_mcp_server_auth.py`
    - `tests/test_mcp_server_e2e.py`
+5. 若是安装相关工具，必须在 skill 文档中明确与 auto-router 的协作关系，避免自然语言误路由。
 
 ## 7. Dry-run 策略
 1. `command` 模式：真实执行 `package-manager --dry-run`。
 2. `simulate` 模式：不执行命令，仅返回模拟成功。
 3. 通过 `PACKAGE_MANAGER_MCP_DRY_RUN_MODE` 控制。
 
-## 8. 并发与超时策略
+## 8. 自动路由约束（在线/离线）
+1. 通用安装请求默认由 `package-manager-online-offline-auto-install` 处理。
+2. 先调 `pm_probe_network(product)`，再分支。
+3. 远端 MCP 模式下，离线分支由本地执行 `scripts/pm_offline_stage_and_upload.py`，然后回到 MCP 做 `pm_check_offline_artifacts + pm_skill_install_guarded + pm_status`。
+4. `package-manager-install-guarded` 可作为兜底，但兜底也必须先探测网络。
+
+## 9. 并发与超时策略
 1. MCP 安装互斥锁：`PACKAGE_MANAGER_INSTALL_LOCK_FILE`。
 2. 锁等待超时：`PACKAGE_MANAGER_INSTALL_LOCK_TIMEOUT_SECONDS`。
 3. 命令超时：`PACKAGE_MANAGER_COMMAND_TIMEOUT_SECONDS`。
 4. 结构化错误码：`lock_timeout/command_timeout/command_exec_error/command_failed`。
 
-## 9. 代码风格与边界
+## 10. 代码风格与边界
 1. 优先组合已有模块，不在入口层堆分支。
 2. 不在文档外硬编码路径；路径由配置和环境变量驱动。
 3. 新增外部契约（CLI 参数、MCP 返回字段）必须同步更新测试与文档。

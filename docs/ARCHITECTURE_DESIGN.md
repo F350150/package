@@ -745,6 +745,7 @@ stop
 1. 让本地 `opencode` 通过自然语言调用远端包管理能力。
 2. 保持“工具白名单 + 最小权限 + 可审计返回”的控制面边界。
 3. 不改动安装器内核主流程，仅在控制面做编排与保护。
+4. 默认安装请求必须先探测网络，再自动路由在线/离线分支。
 
 ### 5.2 关键组件
 | 组件 | 文件 | 作用 |
@@ -753,7 +754,9 @@ stop
 | Control Plane | `src/package_manager/control_plane.py` | 工具能力实现、结构化返回、安装互斥锁 |
 | 启动脚本 | `scripts/start_mcp_server.sh` | 环境变量装配、鉴权模式选择 |
 | Token 生成 | `scripts/generate_mcp_token.py` | HMAC 短期 token 生成 |
-| Skill | `.opencode/skills/package-manager-install-guarded/SKILL.md` | 标准安装编排流程约定 |
+| 离线投放脚本 | `scripts/pm_offline_stage_and_upload.py` | 本地下载并投放离线制品到远端 |
+| Auto Router Skill | `.opencode/skills/package-manager-online-offline-auto-install/SKILL.md` | 安装默认入口，先探测再路由 |
+| Guarded Skill | `.opencode/skills/package-manager-install-guarded/SKILL.md` | 受控安装子流程与兜底 |
 
 ### 5.3 工具与权限模型
 | 工具名 | 动作 | 需要 scope |
@@ -761,8 +764,31 @@ stop
 | `pm_health` | 健康检查 | `pm:read` |
 | `pm_list_packages` | 列包 | `pm:read` |
 | `pm_status` | 状态查询 | `pm:read` |
+| `pm_get_config` | 读取运行配置 | `pm:read` |
+| `pm_probe_network` | 探测远端网络可达性并推荐分支 | `pm:read` |
+| `pm_offline_manifest` | 生成离线投放清单（URL+远端路径） | `pm:read` |
+| `pm_check_offline_artifacts` | 校验离线制品是否就绪 | `pm:read` |
 | `pm_install` | 安装执行 | `pm:write` |
 | `pm_skill_install_guarded` | 受控安装（health->list->dry-run->install->status） | `pm:write` |
+| `pm_offline_stage_and_install` | 一体化路由安装（适合 local bridge） | `pm:write` |
+| `pm_update_config_plan` | 危险配置变更规划 | `pm:admin` |
+| `pm_confirm_plan` | 危险操作挑战令牌 | `pm:admin` |
+| `pm_update_config_apply` | 危险配置变更执行 | `pm:admin` |
+| `pm_uninstall_plan` | 卸载规划 | `pm:admin` |
+| `pm_uninstall_apply` | 卸载执行 | `pm:admin` |
+| `pm_rollback_config` | 配置回滚 | `pm:admin` |
+
+### 5.3.1 自动路由策略
+1. 安装意图默认由 auto-router skill 处理。
+2. 首步调用 `pm_probe_network(product)`。
+3. `recommended_mode=online`：走 `pm_skill_install_guarded -> pm_status`。
+4. `recommended_mode=offline`：
+   1. `pm_offline_manifest`
+   2. 本地执行离线投放脚本（下载+上传）
+   3. `pm_check_offline_artifacts`
+   4. `pm_skill_install_guarded`
+   5. `pm_status`
+5. 在 remote MCP 模式下，不应在远端容器内做“本地下载”步骤。
 
 ### 5.4 鉴权模型
 1. 静态 token：`PACKAGE_MANAGER_MCP_TOKEN` + `PACKAGE_MANAGER_MCP_TOKEN_SCOPES`。
@@ -783,10 +809,12 @@ stop
   - [mcp_remote_deployment_view.puml](/Users/fxl/pycharm_projects/package/docs/puml/mcp_remote_deployment_view.puml)
 - 受控安装时序图：
   - [mcp_guarded_install_sequence.puml](/Users/fxl/pycharm_projects/package/docs/puml/mcp_guarded_install_sequence.puml)
+- 离线优先决策图：
+  - [offline_local_or_download_activity.puml](/Users/fxl/pycharm_projects/package/docs/puml/offline_local_or_download_activity.puml)
 
 ### 5.7 MCP 测试覆盖
 | 测试文件 | 覆盖点 |
 |---|---|
-| `tests/test_control_plane.py` | 工具能力、安装锁、dry-run、超时错误 |
+| `tests/test_control_plane.py` | 工具能力、安装锁、dry-run、超时错误、online/offline 路由判断 |
 | `tests/test_mcp_server_auth.py` | 静态 token/HMAC token/组合 verifier/scope 安全策略 |
-| `tests/test_mcp_server_e2e.py` | streamable-http 协议级端到端工具调用 |
+| `tests/test_mcp_server_e2e.py` | streamable-http 协议级端到端工具调用（含 probe/offline tools） |

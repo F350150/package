@@ -20,7 +20,7 @@ pytest tests/test_mcp_server_e2e.py -q
 ```
 
 覆盖点：
-1. 控制面工具行为（health/list/status/install）。
+1. 控制面工具行为（health/list/status/install/probe/offline-manifest/offline-artifact-check）。
 2. dry-run 与安装互斥锁。
 3. 命令超时与结构化错误。
 4. 静态 token / HMAC token / scope 授权。
@@ -41,12 +41,11 @@ pytest tests/test_mcp_server_e2e.py -q
 ## 4. 手工验收统一口径
 
 核心步骤：
-1. `检查远端包管理服务健康状态`
-2. `列出当前可安装产品`
-3. `安装 DevKit-Porting-Advisor，先 dry-run`
-4. `执行真实安装 DevKit-Porting-Advisor 并返回状态`
-5. `调用 pm_status 查看 DevKit-Porting-Advisor 当前状态`
-6. 危险操作链路（建议工具级执行）：
+1. `安装 DevKit-Porting-Advisor，并返回每个阶段结果`
+2. 观察第一阶段必须出现网络探测（`pm_probe_network`）。
+3. 若探测 online：应走 `pm_skill_install_guarded -> pm_status`。
+4. 若探测 offline：应走 `pm_offline_manifest -> 本地离线上传 -> pm_check_offline_artifacts -> pm_skill_install_guarded -> pm_status`。
+5. 危险操作链路（建议工具级执行）：
    1. `pm_update_config_plan`
    2. `pm_confirm_plan`
    3. `pm_update_config_apply`
@@ -55,13 +54,12 @@ pytest tests/test_mcp_server_e2e.py -q
    6. `pm_uninstall_apply`
 
 通过标准：
-1. `health.healthy=true`。
-2. list 返回目标产品。
-3. dry-run 返回 `status=success`。
-4. real install 返回 `status=success` 或同版本 skip。
-5. status 返回 `installed_version` 且 `last_result=success`。
-6. 危险操作未 confirm 时必须失败，confirm 后才能执行。
-7. 审计日志存在对应记录。
+1. 首步必须有网络探测并返回 `recommended_mode`。
+2. 探测结果与实际执行分支一致（online/offline）。
+3. offline 分支中离线制品检查必须 `ready_for_offline_install=true` 后再安装。
+4. 最终 `status` 返回 `installed_version` 且 `last_result=success`（或同版本 skip 但结果成功）。
+5. 危险操作未 confirm 时必须失败，confirm 后才能执行。
+6. 审计日志存在对应记录。
 
 ## 5. 常见失败与定位
 
@@ -86,6 +84,10 @@ pytest tests/test_mcp_server_e2e.py -q
 7. `confirm_required` / `confirm_expired` / `confirm_replayed`
 - 危险操作必须先 `pm_confirm_plan`。
 - `challenge_token` 默认短期有效，且单次消费。
+
+8. 走了 `pm_skill_install_guarded` 但没先探测网络
+- 这是技能路由问题，应优先触发 `package-manager-online-offline-auto-install`。
+- 检查 `.opencode/skills` 下两个安装 skill 的说明是否为最新版本。
 
 ## 6. 回归建议
 

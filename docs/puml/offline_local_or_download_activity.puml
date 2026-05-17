@@ -1,35 +1,35 @@
 @startuml
 
-title 离线优先决策流程（installer/utils.ensure_local_or_download）
+title 离线优先决策流程（MCP 自动路由 + installer 本地命中）
 
 start
-:输入 url + destination;
+:接收安装请求(product);
+:pm_probe_network(product);
 
-if (destination 存在且是文件?) then (yes)
-  if (size > 0?) then (yes)
-    :打印 "Use local artifact file";
-    :直接返回;
+if (recommended_mode == online?) then (yes)
+  :进入远端在线安装;
+  :pm_skill_install_guarded;
+  stop
+else (no)
+  :进入离线分支;
+  :pm_offline_manifest;
+  :本地执行离线投放脚本\n下载 package + signature 并上传远端;
+  :pm_check_offline_artifacts;
+  if (ready_for_offline_install?) then (yes)
+    :pm_skill_install_guarded;
     stop
   else (no)
-    :判定为空文件，视为不可用;
+    :返回 artifact_not_ready 错误;
+    stop
   endif
-else (no)
 endif
 
-:调用 downloader.download_file(...);
-if (下载成功?) then (yes)
-  :返回;
-  stop
-else (no)
-  :包装 DownloadError;
-  :附加离线提示：
-  note right
-    Offline install hint:
-    place file at <destination>
-    and rerun.
-  end note
-  :抛出 DownloadError(20);
-  stop
-endif
+note right
+  installer 内部仍保留离线优先逻辑：
+  ensure_local_or_download(destination)
+  - destination 文件存在且非空 -> 直接复用
+  - 不存在 -> 尝试在线下载
+  - 下载失败 -> 返回 Offline install hint
+end note
 
 @enduml

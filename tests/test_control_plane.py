@@ -375,3 +375,107 @@ def test_uninstall_plan_confirm_apply(tmp_path: Path):
     assert not target_dir.exists()
     status = cp.status(product="demo-product")
     assert status["state"] is None
+
+
+def test_offline_manifest_and_artifact_check(tmp_path: Path):
+    cp = _control_plane(tmp_path)
+    manifest = cp.offline_manifest("demo-product")
+    assert manifest["status"] == "success"
+    assert manifest["filename"].startswith("demo-product-")
+    pkg_path = Path(manifest["remote_package_path"])
+    sig_path = Path(manifest["remote_signature_path"])
+    if pkg_path.exists():
+        pkg_path.unlink()
+    if sig_path.exists():
+        sig_path.unlink()
+    check0 = cp.check_offline_artifacts("demo-product")
+    assert check0["ready_for_offline_install"] is False
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+    pkg_path.write_bytes(b"pkg")
+    sig_path.write_bytes(b"sig")
+    check1 = cp.check_offline_artifacts("demo-product")
+    assert check1["ready_for_offline_install"] is True
+
+
+def test_probe_network_recommends_online(monkeypatch, tmp_path: Path):
+    cp = _control_plane(tmp_path)
+
+    class _Sock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr("package_manager.control_plane.socket.create_connection", lambda *_a, **_k: _Sock())
+    monkeypatch.setattr("package_manager.control_plane.get_remote_file_size", lambda *_a, **_k: 1234)
+    result = cp.probe_network_for_product("demo-product", timeout_seconds=2)
+    assert result["recommended_mode"] == "online"
+
+
+def test_probe_network_recommends_offline(monkeypatch, tmp_path: Path):
+    cp = _control_plane(tmp_path)
+
+    def _fail(*_a, **_k):
+        raise OSError("network blocked")
+
+    monkeypatch.setattr("package_manager.control_plane.socket.create_connection", _fail)
+    monkeypatch.setattr("package_manager.control_plane.get_remote_file_size", lambda *_a, **_k: None)
+    result = cp.probe_network_for_product("demo-product", timeout_seconds=2)
+    assert result["recommended_mode"] == "offline"
+
+
+def test_offline_stage_and_install_routes_online(monkeypatch, tmp_path: Path):
+    cp = _control_plane(tmp_path)
+    monkeypatch.setattr(
+        cp,
+        "probe_network_for_product",
+        lambda product, timeout_seconds=5: {
+            "status": "success",
+            "product": product,
+            "recommended_mode": "online",
+        },
+    )
+    monkeypatch.setattr(cp, "install_with_guardrails", lambda product: {"status": "success", "product": product})
+    monkeypatch.setattr(cp, "status", lambda product=None: {"status": "success", "product": product, "state": {}})
+    result = cp.offline_stage_and_install(product="demo-product")
+    assert result["status"] == "success"
+    assert result["executed_mode"] == "online"
+    assert result["phases"]["install"]["status"] == "success"
+
+
+def test_offline_stage_and_install_routes_offline(monkeypatch, tmp_path: Path):
+    cp = _control_plane(tmp_path)
+    monkeypatch.setattr(
+        cp,
+        "probe_network_for_product",
+        lambda product, timeout_seconds=5: {
+            "status": "success",
+            "product": product,
+            "recommended_mode": "offline",
+        },
+    )
+    monkeypatch.setattr(
+        cp,
+        "offline_manifest",
+        lambda product: {
+            "status": "success",
+            "product": product,
+            "package_url": "https://example.com/a.tar.gz",
+            "signature_url": "https://example.com/a.tar.gz.p7s",
+            "remote_package_path": str(tmp_path / "_internal" / "packages" / "demo-product" / "a.tar.gz"),
+            "remote_signature_path": str(tmp_path / "_internal" / "packages" / "demo-product" / "a.tar.gz.p7s"),
+        },
+    )
+    monkeypatch.setattr(cp, "_stage_offline_artifacts", lambda **_kwargs: {"status": "success", "exit_code": 0})
+    monkeypatch.setattr(
+        cp,
+        "check_offline_artifacts",
+        lambda product: {"status": "success", "product": product, "ready_for_offline_install": True},
+    )
+    monkeypatch.setattr(cp, "install_with_guardrails", lambda product: {"status": "success", "product": product})
+    monkeypatch.setattr(cp, "status", lambda product=None: {"status": "success", "product": product, "state": {}})
+    result = cp.offline_stage_and_install(product="demo-product", docker_container="openeuler-arm-mcp")
+    assert result["status"] == "success"
+    assert result["executed_mode"] == "offline"
+    assert result["phases"]["stage_upload"]["status"] == "success"

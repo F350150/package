@@ -1,13 +1,13 @@
 # OpenCode 自然语言验收测试表（25.3.0 场景）
 
-测试日期：2026-05-17  
+测试日期：2026-05-18  
 环境：`openeuler-arm-mcp`（remote MCP）  
 目标产品：`DevKit-Porting-Advisor`
 
 ## 1. 测试目标
 1. 通过危险操作标准链路修改配置，支持 `25.3.0`。
-2. 使用自然语言安装链路完成 `25.3.0` 安装。
-3. 若失败，修复代码/技能并复测直至通过。
+2. 使用自然语言自动路由安装链路完成 `25.3.0` 安装。
+3. 校验安装请求默认先做网络探测，再自动选择在线/离线分支。
 
 ## 2. 测试表（含实测结果）
 
@@ -19,6 +19,7 @@
 | TC-2530-004 | “再次读取 DevKit-Porting-Advisor 配置” | `pm_get_config` | 看到 `project_version=25.3.0`，`artifact_version=25.3.0` | 通过 | 实测配置已更新 |
 | TC-2530-005 (初测) | “安装 DevKit-Porting-Advisor” | `pm_skill_install_guarded` | 真实安装成功 | 失败 | 下载与验签成功，但旧安装器不识别新包布局，报 `No Porting-Advisor payload directory found` |
 | TC-2530-006 (修复后复测) | “安装 DevKit-Porting-Advisor” | `pm_skill_install_guarded` | 真实安装成功，状态更新到 `25.3.0` | 通过 | `install.status=success`，`pm_status.installed_version=25.3.0` |
+| TC-2530-007 (自动路由) | “安装 DevKit-Porting-Advisor，并返回每个阶段结果” | `pm_probe_network -> online/offline 分支` | 首步必须网络探测，分支与探测结果一致 | 通过 | 实测先调用 `pm_probe_network`，在 offline 条件下走离线投放后安装成功 |
 
 ## 3. 问题与修复
 
@@ -42,4 +43,4 @@
 2. `25.3.0` 安装链路通过，最终状态：
    - `installed_version=25.3.0`
    - `last_result=success`
-3. 本场景验收结论：**通过**。
+3. 自动路由场景验收结论：**通过**。

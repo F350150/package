@@ -1,50 +1,48 @@
 @startuml
 
-title pm_skill_install_guarded 受控安装时序图
+title 自动路由安装时序图（probe -> online/offline）
 
 autonumber
 actor User
 participant "opencode" as OC
-participant "Skill" as SK
-participant "pm_skill_install_guarded" as TOOL
+participant "Auto Router Skill" as SK
+participant "MCP Tools" as TOOL
 participant "PackageManagerControlPlane" as CP
+participant "Local Stage Script" as STAGE
 participant "package-manager binary" as BIN
 participant "install_state" as STATE
 
-User -> OC: 安装 DevKit-Porting-Advisor，先 dry-run，再真实安装
-OC -> SK: 触发 skill
-SK -> TOOL: call(product)
-TOOL -> CP: install_with_guardrails(product)
+User -> OC: 安装 DevKit-Porting-Advisor，并返回每个阶段结果
+OC -> SK: 触发自动路由 skill
+SK -> TOOL: pm_probe_network(product)
+TOOL -> CP: probe_network_for_product()
+CP --> TOOL: recommended_mode
+TOOL --> SK: mode
 
-CP -> CP: health()
-
-break unhealthy
-  CP --> TOOL: error(phase=health)
-  TOOL --> OC: fail
+alt recommended_mode = online
+  SK -> TOOL: pm_skill_install_guarded(product)
+  TOOL -> CP: install_with_guardrails()
+  CP -> CP: health + list + dry-run
+  CP -> BIN: run install
+  BIN -> STATE: update
+  CP --> TOOL: phases
+  SK -> TOOL: pm_status(product)
+  TOOL --> OC: success summary
+else recommended_mode = offline
+  SK -> TOOL: pm_offline_manifest(product)
+  TOOL --> SK: manifest
+  SK -> STAGE: local download + upload artifacts
+  STAGE --> SK: upload result
+  SK -> TOOL: pm_check_offline_artifacts(product)
+  TOOL --> SK: ready_for_offline_install
+  SK -> TOOL: pm_skill_install_guarded(product)
+  TOOL -> CP: install_with_guardrails()
+  CP -> BIN: run install (offline artifacts hit)
+  BIN -> STATE: update
+  SK -> TOOL: pm_status(product)
+  TOOL --> OC: success summary
 end
 
-CP -> CP: list_packages()
-CP -> CP: validate_product()
-
-break unknown/disabled
-  CP --> TOOL: error(phase=validate_product)
-  TOOL --> OC: fail
-end
-
-CP -> CP: install(dry_run=true)
-
-break dry_run fail
-  CP --> TOOL: error(phase=dry_run)
-  TOOL --> OC: fail
-end
-
-CP -> CP: acquire install lock
-CP -> BIN: run --name &lt;product&gt;
-BIN -> STATE: write installed_version/last_result
-CP -> CP: release install lock
-CP -> CP: status(product)
-CP --> TOOL: success(phases)
-TOOL --> OC: structured result
-OC --> User: phase-by-phase summary
+OC --> User: 分阶段结果（含 executed branch）
 
 @enduml
